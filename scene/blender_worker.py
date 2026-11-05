@@ -47,6 +47,8 @@ def main():
                 reply = {'ok': True, 'result': result}
             except Exception as error:
                 reply = {'ok': False, 'error': f'{type(error).__name__}: {error}'}
+            sys.stdout.flush()
+            sys.stderr.flush()
             responses.write(json.dumps(reply) + '\n')
             if closing:
                 break

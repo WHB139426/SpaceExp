@@ -3,11 +3,13 @@
 import json
 import math
 from pathlib import Path
-from statistics import median
 from types import SimpleNamespace
 
 import bpy
 from mathutils import Matrix, Quaternion, Vector
+
+from .boundary import movement_block_reason
+from .trajectory import TrajectoryMap
 
 
 def emission_material(name, color, strength=1):
@@ -97,7 +99,7 @@ def create_scene(source, args):
     return meshes, point_nodes, corners, center, extent, camera, scene
 
 
-def estimate_scene_up(meshes, cameras, extent):
+def estimate_scene_up(meshes, cameras, extent, up_override=None):
     """Return up, description, and a floor point; use a low-point estimate if no plane fits."""
     import numpy as np
 
@@ -105,8 +107,15 @@ def estimate_scene_up(meshes, cameras, extent):
     rotations = extrinsics[:, :3, :3]
     translations = extrinsics[:, :3, 3]
     camera_centers = -np.einsum('nij,nj->ni', rotations.transpose(0, 2, 1), translations)
-    first_camera_up = -rotations[0, 1, :]
-    first_camera_up /= np.linalg.norm(first_camera_up)
+    camera_ups = -rotations[:, 1, :]
+    camera_ups /= np.linalg.norm(camera_ups, axis=1, keepdims=True)
+    reference_up = np.asarray(up_override, dtype=float) if up_override is not None else np.median(camera_ups, axis=0)
+    length = np.linalg.norm(reference_up)
+    if not np.isfinite(reference_up).all() or length < 1e-6:
+        raise ValueError('Camera orientations do not provide a stable up direction; set scene up explicitly')
+    reference_up = reference_up / length
+    if up_override is None and float(np.median(camera_ups @ reference_up)) < .5:
+        raise ValueError('Camera up directions disagree; set scene up explicitly')
 
     arrays = []
     for obj in meshes:
@@ -121,17 +130,22 @@ def estimate_scene_up(meshes, cameras, extent):
     rng = np.random.default_rng(42)
     sample = cloud[rng.choice(len(cloud), min(len(cloud), 12000), replace=False)]
     tolerance = max(extent * 0.003, 1e-8)
+    levels = sample @ reference_up
+    pool = sample[levels <= np.quantile(levels, .2)]
+    if len(pool) < 3:
+        pool = sample
     best = None
-    for _ in range(500):
-        a, b, c = sample[rng.choice(len(sample), 3, replace=False)]
+    for _ in range(1500):
+        a, b, c = pool[rng.choice(len(pool), 3, replace=False)]
         normal = np.cross(b - a, c - a)
         length = np.linalg.norm(normal)
         if length < 1e-10 * extent * extent:
             continue
         normal /= length
-        if normal @ first_camera_up < 0:
+        if normal @ reference_up < 0:
             normal = -normal
-        if normal @ first_camera_up < 0.75:
+        # Use the whole sequence as the vertical reference, rejecting wall planes.
+        if normal @ reference_up < np.cos(np.deg2rad(30)):
             continue
         offset = -normal @ a
         heights = np.einsum('ij,j->i', sample, normal) + offset
@@ -149,33 +163,37 @@ def estimate_scene_up(meshes, cameras, extent):
         if best is None or score > best[0]:
             best = (score, inliers)
     if best is None:
-        floor_height = float(np.quantile(sample @ first_camera_up, 0.05))
-        floor_point = first_camera_up * floor_height
-        return (first_camera_up.tolist(),
-                'first camera; approximate floor from lower 5% of points', floor_point.tolist())
+        floor_height = float(np.quantile(sample @ reference_up, 0.05))
+        floor_point = reference_up * floor_height
+        return (reference_up.tolist(),
+                'multi-camera up; approximate floor from lower 5% of points', floor_point.tolist(), sample, cloud)
 
     floor = sample[best[1]]
     center = floor.mean(axis=0)
     _, _, basis = np.linalg.svd(floor - center, full_matrices=False)
     normal = basis[-1]
-    if normal @ first_camera_up < 0:
+    if normal @ reference_up < 0:
         normal = -normal
+    if normal @ reference_up < np.cos(np.deg2rad(30)):
+        floor_height = float(np.quantile(sample @ reference_up, .05))
+        return (reference_up.tolist(), 'multi-camera up; approximate floor after rejected refinement',
+                (reference_up * floor_height).tolist(), sample, cloud)
     camera_above = float(np.mean((camera_centers - center) @ normal > tolerance))
     return normal.tolist(), (f'floor plane: {len(floor):,}/{len(sample):,} sampled points; '
-                           f'{camera_above:.0%} cameras above'), center.tolist()
+                           f'{camera_above:.0%} cameras above'), center.tolist(), sample, cloud
 
 
-def configure_first_person(camera, cameras, panel_width):
+def configure_first_person(camera, frame, panel_width):
     """Keep the video focal lengths while extending its view to a square frame."""
     import bpy
 
-    fx_norm = median(frame['intrinsic'][0][0] / frame['W'] for frame in cameras)
-    fy_norm = median(frame['intrinsic'][1][1] / frame['H'] for frame in cameras)
-    cx_norm = median(frame['intrinsic'][0][2] / frame['W'] for frame in cameras)
-    cy_norm = median(frame['intrinsic'][1][2] / frame['H'] for frame in cameras)
+    fx_norm = frame['intrinsic'][0][0] / frame['W']
+    fy_norm = frame['intrinsic'][1][1] / frame['H']
+    cx_norm = frame['intrinsic'][0][2] / frame['W']
+    cy_norm = frame['intrinsic'][1][2] / frame['H']
 
     width = height = panel_width
-    video_height = max(1, round(width * cameras[0]['H'] / cameras[0]['W']))
+    video_height = max(1, round(width * frame['H'] / frame['W']))
     # Keep the original horizontal field of view and central video projection.
     # Extra rows above and below it expand the view without stretching pixels.
     fx = fx_norm * width
@@ -193,25 +211,16 @@ def configure_first_person(camera, cameras, panel_width):
     camera.data.shift_y = (cy - height / 2) * pixel_aspect_y / width
 
     return {
-        'source': 'median_scene_cameras',
+        'source': 'first_scene_camera',
         'width': width, 'height': height,
         'fx': fx, 'fy': fy, 'cx': cx, 'cy': cy,
         'pixel_aspect_y': pixel_aspect_y,
     }
 
 
-def initial_camera_pose(extrinsic, up, floor_normal, floor_point, eye_height):
-    """Project the first camera onto the floor along up, then rise by eye_height."""
-    from mathutils import Matrix, Vector
-
-    pose = Matrix(extrinsic).inverted()
-    position = pose.translation
-    direction = pose.to_3x3() @ Vector((0, 0, 1))
-    alignment = up.dot(floor_normal)
-    if alignment <= 0:
-        raise ValueError('Scene up must point away from the estimated floor')
-    position += up * (eye_height - (position - floor_point).dot(floor_normal) / alignment)
-    return position, direction
+def initial_camera_pose(extrinsic):
+    """Convert the recorded OpenCV camera pose to Blender's camera axes."""
+    return Matrix(extrinsic).inverted() @ Matrix.Diagonal((1, -1, -1, 1))
 
 
 def create_crosshair(camera, scene):
@@ -260,45 +269,62 @@ class SceneRenderer:
         self.config = config
         directory = Path(config['scene_dir'])
         cameras = json.loads((directory / 'cameras.json').read_text())
+        cameras.sort(key=lambda frame: frame.get('video_frame_index', frame.get('id', 0)))
         args = SimpleNamespace(samples=config['samples'], resolution=config['resolution'])
         meshes, point_nodes, _, self.center, self.extent, self.camera, self.scene = create_scene(
             directory / 'reconstruction.ply', args)
         for points in point_nodes:
             points.inputs['Radius'].default_value = config['point_radius']
-        estimated, description, floor = estimate_scene_up(meshes, cameras, self.extent)
+        first = cameras[0]
+        initial_pose = initial_camera_pose(first['extrinsic'])
+        self.initial_position = initial_pose.translation.copy()
+        self.initial_rotation = initial_pose.to_quaternion().normalized()
+        estimated, description, floor, sample, cloud = estimate_scene_up(
+            meshes, cameras, self.extent, config['up'])
+        self.floor_description = description
         self.up = Vector(config['up'] if config['up'] is not None else estimated).normalized()
-        position, direction = initial_camera_pose(
-            cameras[0]['extrinsic'], self.up, Vector(estimated), Vector(floor), config['eye_height'])
-        direction -= self.up * direction.dot(self.up)
-        if direction.length < 1e-8:
-            raise ValueError('Initial camera direction is vertical; cannot determine a horizontal heading')
-        self.initial_position = position.copy()
-        self.initial_forward = direction.normalized()
-        self.intrinsics = configure_first_person(self.camera, cameras, config['resolution'])
-        create_crosshair(self.camera, self.scene)
+        if self.up.length < 1e-8 or not all(math.isfinite(value) for value in self.up):
+            raise ValueError('Scene up must be a finite, nonzero vector')
+        forward = self.initial_rotation @ Vector((0, 0, -1))
+        heading = forward - self.up * forward.dot(self.up)
+        if heading.length < 1e-6:
+            # A vertical first view has no projected forward direction. Use its
+            # right axis to choose a horizontal heading without changing the pose.
+            heading = self.up.cross(self.initial_rotation @ Vector((1, 0, 0)))
+        self.initial_heading = heading.normalized()
+        self.intrinsics = configure_first_person(self.camera, first, config['resolution'])
+        self.crosshair = create_crosshair(self.camera, self.scene)
+        self.trajectory_map = TrajectoryMap(self, sample, floor, cloud)
         self.start_session(output)
-        print(f'Scene loaded: {directory}; up={list(self.up)} ({description})', flush=True)
+        print(f'Scene loaded: {directory}; scene up={list(self.up)} ({description}); '
+              'camera pose from the first recorded frame', flush=True)
 
-    def _apply_pose(self, position, forward):
-        backward = -forward.normalized()
-        right = self.up.cross(backward).normalized()
-        screen_up = backward.cross(right).normalized()
+    def _apply_pose(self, position, rotation):
         self.camera.location = position
-        self.camera.rotation_euler = Matrix((right, screen_up, backward)).transposed().to_euler()
+        self.camera.rotation_mode = 'QUATERNION'
+        self.camera.rotation_quaternion = rotation.normalized()
         self.camera.data.clip_end = max(
             self.extent * 20, (self.camera.location - self.center).length + self.extent * 2)
 
     def start_session(self, output):
         output = Path(output)
         output.mkdir(parents=True, exist_ok=True)
-        self._apply_pose(self.initial_position, self.initial_forward)
+        self._apply_pose(self.initial_position, self.initial_rotation)
+        self.heading = self.initial_heading.copy()
         self.output = output
         self.index = 0
+        self.observations = []
 
-    def observe(self, command='observe'):
+    def observe(self, command='observe', magnitude=None, applied_magnitude=None, blocked=False, reason=None):
         index = self.index + 1
-        image = self.output / f'{index:04d}_{command}.png'
+        label = command if magnitude is None else f'{command}_{str(magnitude).removesuffix(".0")}'
+        if blocked:
+            label += '_blocked'
+        image = self.output / f'{index:04d}_{label}.png'
         metadata = image.with_suffix('.json')
+        top_down = image.with_name(image.stem + '_top_down.png')
+        trajectory_path = self.output / 'trajectory.json'
+        temporary_trajectory = trajectory_path.with_suffix('.json.tmp')
         try:
             bpy.context.view_layer.update()
             self.scene.render.filepath = str(image)
@@ -307,37 +333,74 @@ class SceneRenderer:
                 'observation_id': index, 'image': str(image),
                 'width': self.config['resolution'], 'height': self.config['resolution'],
             }
-            metadata.write_text(json.dumps({
+            if magnitude is not None:
+                record.update(magnitude=magnitude, applied_magnitude=applied_magnitude, blocked=blocked, reason=reason)
+            observation = {
                 **record, 'command': command,
+                'magnitude': magnitude, 'applied_magnitude': applied_magnitude,
+                'blocked': blocked, 'reason': reason,
                 'position': list(self.camera.location),
-                'forward': list(self.camera.rotation_euler.to_matrix() @ Vector((0, 0, -1))),
-                'intrinsics': self.intrinsics,
+                'forward': list(self.camera.rotation_quaternion @ Vector((0, 0, -1))),
+                'heading': list(self.heading),
+                'up': list(self.camera.rotation_quaternion @ Vector((0, 1, 0))),
+                'top_down_image': str(top_down),
+            }
+            observations = [*self.observations, observation]
+            frame = self.trajectory_map.render(self.output, observations)
+            metadata.write_text(json.dumps({
+                **observation, 'intrinsics': self.intrinsics, 'top_down_frame': frame,
             }, indent=2) + '\n')
+            temporary_trajectory.write_text(json.dumps(observations, indent=2) + '\n')
+            temporary_trajectory.replace(trajectory_path)
         except BaseException:
-            image.unlink(missing_ok=True)
-            metadata.unlink(missing_ok=True)
+            for path in (image, metadata, temporary_trajectory):
+                if not path.is_dir():
+                    path.unlink(missing_ok=True)
             raise
         self.index = index
+        self.observations = observations
         return record
 
     def action(self, key, magnitude=None):
-        if key not in {'move_forward', 'turn_left', 'turn_right'}:
-            raise ValueError('Allowed actions: move_forward, turn_left, turn_right')
+        if key not in {'move_forward', 'turn_left', 'turn_right', 'turn_up', 'turn_down'}:
+            raise ValueError('Allowed actions: move_forward, turn_left, turn_right, turn_up, turn_down')
         if magnitude is None:
             magnitude = self.config['move_step' if key == 'move_forward' else 'look_step']
         if type(magnitude) not in (int, float) or not math.isfinite(magnitude) or magnitude <= 0:
             raise ValueError('Magnitude must be a positive finite number')
         position = self.camera.location.copy()
-        forward = (self.camera.rotation_euler.to_matrix() @ Vector((0, 0, -1))).normalized()
-        next_position, next_forward = position.copy(), forward.copy()
+        rotation = self.camera.rotation_quaternion.copy()
+        heading = self.heading.copy()
+        next_position, next_rotation = position.copy(), rotation.copy()
+        next_heading = heading.copy()
+        applied_magnitude = magnitude
+        reason = None
         if key == 'move_forward':
-            next_position += forward * magnitude
-        else:
+            if self.config.get('boundary_enforced', True):
+                reason = movement_block_reason(self.trajectory_map.boundary, position, heading, magnitude)
+            if reason is None:
+                next_position += heading * magnitude
+            else:
+                applied_magnitude = 0
+        elif key in {'turn_left', 'turn_right'}:
             angle = math.radians(magnitude) * (1 if key == 'turn_left' else -1)
-            next_forward = Quaternion(self.up, angle) @ forward
-        self._apply_pose(next_position, next_forward)
+            turn = Quaternion(self.up, angle)
+            next_heading = (turn @ heading).normalized()
+            next_rotation = turn @ rotation
+        else:
+            forward = rotation @ Vector((0, 0, -1))
+            pitch = math.atan2(forward.dot(self.up), forward.dot(heading))
+            angle = math.radians(magnitude) * (1 if key == 'turn_up' else -1)
+            next_pitch = max(-math.pi / 2, min(math.pi / 2, pitch + angle))
+            applied_magnitude = math.degrees(abs(next_pitch - pitch))
+            right = heading.cross(self.up).normalized()
+            next_rotation = Quaternion(right, next_pitch - pitch) @ rotation
+        if reason is None:
+            self._apply_pose(next_position, next_rotation)
+            self.heading = next_heading
         try:
-            return self.observe(key)
+            return self.observe(key, magnitude, applied_magnitude, blocked=reason is not None, reason=reason)
         except BaseException:
-            self._apply_pose(position, forward)
+            self._apply_pose(position, rotation)
+            self.heading = heading
             raise

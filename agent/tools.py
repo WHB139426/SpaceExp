@@ -43,20 +43,35 @@ def create_tools(camera, *, move_step, look_step) -> list[Tool]:
             description=(
                 'Execute one action relative to the current first-person camera and return its updated view as one image. '
                 'Useful, for example, for approaching an object or looking around to gather visual evidence. '
-                'move_forward moves along the current horizontal viewing direction, preserving height and orientation. '
-                'turn_left and turn_right rotate the camera toward its own left or right, preserving position and pitch. '
-                f'Default forward distance: {move_step:g} scene units. '
+                'Actions are relative to the current first-person viewpoint and use the scene up direction for ground movement. '
+                'move_forward moves along the stored horizontal forward direction, preserving height and camera orientation. '
+                'The initial forward direction is the first frame\'s viewing direction projected onto the ground plane. '
+                'turn_left and turn_right rotate both this forward direction and the camera around scene up, preserving position and pitch. '
+                'turn_up and turn_down adjust camera pitch only, preserving position and horizontal forward direction. '
+                'Pitch is limited to -90 through 90 degrees; looking vertically up or down retains the horizontal forward direction. '
+                'Looking down does not make move_forward descend, and looking up does not make it ascend. '
+                'The initial camera position and complete orientation are preserved from the first recorded frame. '
+                'One scene unit is one meter. Movement magnitudes are in meters; turn magnitudes are in degrees. '
+                f'Default forward distance: {move_step:g} meters. '
                 f'Default turn angle: {look_step:g} degrees. '
-                'Distances use the PLY coordinate scale; for metric-calibrated scenes they are approximately meters. '
-                'Magnitudes must be positive and finite. There is no collision detection.'
+                'Magnitudes must be positive and finite. '
+                'When scene-boundary limits are enabled, the entire forward path must stay inside the scene boundary with camera clearance. '
+                'A blocked move keeps the camera in place and returns blocked=true, reason, and applied_magnitude=0, together with the current view. '
+                'Turning remains allowed. Furniture and interior obstacles are not collision-tested.'
             ),
             parameters={
                 'type': 'object',
                 'properties': {
-                    'key': {'type': 'string', 'enum': ['move_forward', 'turn_left', 'turn_right']},
+                    'key': {'type': 'string', 'enum': [
+                        'move_forward', 'turn_left', 'turn_right', 'turn_up', 'turn_down',
+                    ]},
                     'magnitude': {
                         'type': 'number', 'exclusiveMinimum': 0,
-                        'description': 'Distance in scene units for move_forward, or angle in degrees for a turn. Omit to use the default.',
+                        'description': (
+                            'Distance in meters for move_forward (one scene unit equals one meter), '
+                            'or angle in degrees for a turn. '
+                            f'Omit to move {move_step:g} meters or turn {look_step:g} degrees.'
+                        ),
                     },
                 },
                 'required': ['key'], 'additionalProperties': False,

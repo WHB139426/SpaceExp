@@ -40,16 +40,25 @@ AGENT_CONFIG = {
     "max_conversation_images": 6,
 }
 SCENE_CONFIG = {
-    "scene_dir": "/data4/haibo/data/3D_Env/scannetpp/fc2875ea52",
+    "scene_dir": "/data4/haibo/data/3D_Env/scannetpp/307e3262f1",
     "blender": "/data4/haibo/software/blender/blender-4.5.13-linux-x64/blender",
     "timeout": 300,
     "resolution": 960,
     "samples": 16,
+    "trajectory_resolution": 960,
+    "trajectory_samples": 4,
+    "trajectory_max_height": 1.8,
+    "trajectory_dpi": 180,
+    "trajectory_arrow_length": 0.25,
+    "boundary_enforced": True,  # Reject forward moves whose full path leaves the inset region.
+    "boundary_preview": True,  # Show the boundary on the local top-down chart.
+    "boundary_cell_size": 0.05,
+    "boundary_close_radius": 0.15,
+    "camera_radius": 0.15,
     "point_radius": 0.015,
     "move_step": 0.3,
     "look_step": 15,
-    "eye_height": 1.0,
-    "up": None,  # None: estimate from the scene; otherwise use [x, y, z].
+    "up": None,  # Scene up for ground movement, yaw, and the map; None estimates it from the scene.
 }
 OUTPUT_DIR = str(Path(__file__).resolve().parent / "outputs")
 

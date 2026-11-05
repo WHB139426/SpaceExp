@@ -5,6 +5,9 @@ import os
 from pathlib import Path
 import select
 import subprocess
+import sys
+
+from .trajectory import draw_trajectory
 
 
 class CameraClient:
@@ -62,10 +65,21 @@ class CameraClient:
         return self._read_result()
 
     def observe(self):
-        return self._request('observe')
+        return self._observation('observe')
 
     def action(self, key, magnitude=None):
-        return self._request('action', key=key, magnitude=magnitude)
+        return self._observation('action', key=key, magnitude=magnitude)
+
+    def _observation(self, operation, **params):
+        record = self._request(operation, **params)
+        try:
+            metadata = json.loads(Path(record['image']).with_suffix('.json').read_text())
+            observations = json.loads((Path(record['image']).parent / 'trajectory.json').read_text())
+            draw_trajectory(metadata['top_down_frame'], observations, metadata['top_down_image'])
+        except Exception as error:
+            # The action has completed. A local chart failure must not hide its observation.
+            print(f'Local trajectory plot failed for {record["image"]}: {error}', file=sys.stderr)
+        return record
 
     def start_session(self, output):
         self._request('start_session', output=str(output))
