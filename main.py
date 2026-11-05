@@ -1,0 +1,126 @@
+"""Explore an existing point-cloud scene with an agent and a persistent Blender worker."""
+
+from datetime import datetime
+from pathlib import Path
+
+from agent import Agent
+from agent.backend import VLLMBackend
+from agent.protocols import create_protocol
+from agent.tools import create_tools
+from scene.client import CameraClient
+
+
+MODEL = "qwen3.8-27b"
+MODEL_GENERATION_CONFIGS = {
+    "qwen3.8-27b": {
+        "max_tokens": 16 * 1024,
+        "temperature": 1.0,
+        "top_p": 0.95,
+        "top_k": 20,
+        "enable_thinking": True,
+        "reasoning_effort": "medium",  # "low", "medium", "xhigh"
+        "preserve_thinking": True,
+    },
+    "qwen3.8-flash-next": {
+        "max_tokens": 16 * 1024,
+        "temperature": 1.0,
+        "top_p": 0.95,
+        "top_k": 20,
+        "enable_thinking": True,
+        "reasoning_effort": "medium",  # "low", "medium", "xhigh"
+        "preserve_thinking": True,
+    },
+}
+MODEL_SERVER_CONFIG = {
+    "base_url": "http://127.0.0.1:8000/v1",
+    "timeout": 180,
+}
+AGENT_CONFIG = {
+    "max_steps": 100,
+    "max_conversation_images": 6,
+}
+SCENE_CONFIG = {
+    "scene_dir": "/data4/haibo/data/3D_Env/scannetpp/fc2875ea52",
+    "blender": "/data4/haibo/software/blender/blender-4.5.13-linux-x64/blender",
+    "timeout": 300,
+    "resolution": 960,
+    "samples": 16,
+    "point_radius": 0.015,
+    "move_step": 0.3,
+    "look_step": 15,
+    "eye_height": 1.0,
+    "up": None,  # None: estimate from the scene; otherwise use [x, y, z].
+}
+OUTPUT_DIR = str(Path(__file__).resolve().parent / "outputs")
+
+SYSTEM_PROMPT = """You are a spatial agent exploring a reconstructed 3D point-cloud scene.
+Use the available tools to gather evidence and complete the user's task.
+
+Visual evidence
+Observations show the current first-person camera view. Inspect each new image before continuing.
+Images describe the viewpoint when obtained. Point-cloud gaps may be reconstruction artifacts.
+State uncertainty when the visual evidence is insufficient, and answer once you have enough evidence."""
+
+
+def new_conversation_path() -> Path:
+    return (Path(OUTPUT_DIR).expanduser().resolve()
+            / datetime.now().strftime("chat_%Y%m%d_%H%M%S_%f") / "conversation.json")
+
+
+def run_conversation(backend, camera, conversation_path, model_config):
+    agent = Agent(
+        backend,
+        create_protocol(MODEL, **{key: model_config[key] for key in (
+            "enable_thinking", "reasoning_effort", "preserve_thinking")}),
+        create_tools(camera, move_step=SCENE_CONFIG["move_step"], look_step=SCENE_CONFIG["look_step"]),
+        system_prompt=SYSTEM_PROMPT, **AGENT_CONFIG,
+        conversation_path=conversation_path,
+    )
+    print(f"Agent model: {MODEL}\nScene: {SCENE_CONFIG['scene_dir']}\nConversation: {agent.conversation_path}")
+    print("Ask a question. /new starts a fresh exploration; /exit quits.")
+    while True:
+        try:
+            prompt = input("agent> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            break
+        if prompt.lower() in {"/exit", "exit", "quit"}:
+            break
+        if prompt.lower() == "/new":
+            next_path = new_conversation_path()
+            camera.start_session(next_path.parent)
+            agent.conversation_path = next_path
+            agent.reset()
+            print(f"New exploration: {agent.conversation_path}", flush=True)
+            continue
+        if prompt:
+            try:
+                print("Agent:", agent.run(prompt), flush=True)
+            except Exception as error:
+                print(f"Error: {error}", flush=True)
+
+
+def main():
+    model_config = MODEL_GENERATION_CONFIGS[MODEL]
+    backend = VLLMBackend(
+        MODEL, **MODEL_SERVER_CONFIG,
+        **{key: model_config[key] for key in ("max_tokens", "temperature", "top_p", "top_k")},
+    )
+    try:
+        config = {
+            **SCENE_CONFIG,
+            'scene_dir': str(Path(SCENE_CONFIG['scene_dir']).expanduser().resolve()),
+        }
+        conversation_path = new_conversation_path()
+        with CameraClient(config['blender'], config, conversation_path.parent, timeout=config['timeout']) as camera:
+            run_conversation(backend, camera, conversation_path, model_config)
+    finally:
+        backend.client.close()
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except KeyboardInterrupt:
+        raise SystemExit(130)
