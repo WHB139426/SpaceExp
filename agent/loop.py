@@ -8,12 +8,23 @@ from pathlib import Path
 from .types import ChatProtocol, Message, Model, Tool, ToolOutput
 
 
-def trim_images(messages: list[Message], max_images: int) -> None:
+def trim_images(messages: list[Message], max_images: int, *, preserve_prompt_images: bool = False) -> None:
     """Replace older images as whole message groups, retaining their text."""
     if max_images == -1:
         return
     remaining = max_images
+    prompt = None
+    if preserve_prompt_images:
+        prompt = next((message for message in messages
+                       if message.get('role') == 'user' and isinstance(message.get('content'), list)), None)
+        if prompt is not None:
+            count = sum(part.get('type') in {'image', 'image_url'} for part in prompt['content'])
+            if count > max_images:
+                raise ValueError('max_conversation_images is smaller than the number of prompt images')
+            remaining -= count
     for message in reversed(messages):
+        if message is prompt:
+            continue
         content = message.get("content")
         if not isinstance(content, list):
             continue
@@ -39,6 +50,7 @@ class Agent:
         max_steps: int,
         max_conversation_images: int,
         conversation_path: str | Path | None = None,
+        preserve_prompt_images: bool = False,
     ) -> None:
         if max_steps < 1:
             raise ValueError("max_steps must be at least 1")
@@ -52,6 +64,7 @@ class Agent:
         self.system_prompt = system_prompt
         self.max_steps = max_steps
         self.max_conversation_images = max_conversation_images
+        self.preserve_prompt_images = preserve_prompt_images
         self.conversation_path = Path(conversation_path) if conversation_path is not None else None
         self.reset()
 
@@ -73,7 +86,8 @@ class Agent:
         self.messages.append({"role": "user", "content": prompt})
         schemas = [tool.schema() for tool in self.tools.values()]
         for _ in range(self.max_steps):
-            trim_images(self.messages, self.max_conversation_images)
+            trim_images(self.messages, self.max_conversation_images,
+                        preserve_prompt_images=self.preserve_prompt_images)
             self._save()
             assistant = self.protocol.parse(self.model.generate(self.protocol.render(self.messages, schemas)))
             self.messages.append(assistant)

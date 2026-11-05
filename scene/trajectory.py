@@ -1,4 +1,4 @@
-"""Blender map backgrounds and local trajectory charts, never sent to the model."""
+"""Blender map backgrounds and trajectory charts, optionally exposed by a tool."""
 
 from pathlib import Path
 
@@ -27,6 +27,19 @@ class TrajectoryMap:
             raise ValueError('No map points remain; increase trajectory_max_height')
         xy = (points[keep] - np.asarray(self.origin)) @ np.column_stack((self.right, self.ahead))
         self.low, self.high = np.quantile(xy, [.005, .995], axis=0)
+        self.target = None
+        if renderer.config.get('target_camera') is not None:
+            pose = np.linalg.inv(np.asarray(renderer.config['target_camera']['extrinsic'], dtype=float))
+            self.target = {'position': pose[:3, 3].tolist(), 'forward': pose[:3, 2].tolist()}
+            basis = np.column_stack((self.right, self.ahead))
+            target_xy = (pose[:3, 3] - np.asarray(self.origin)) @ basis
+            direction = pose[:3, 2] @ basis
+            length = np.linalg.norm(direction)
+            tip = target_xy.copy()
+            if length > 1e-6:
+                tip += direction / length * renderer.config.get('trajectory_arrow_length', .25) * 1.4
+            self.low = np.minimum(self.low, np.minimum(target_xy, tip))
+            self.high = np.maximum(self.high, np.maximum(target_xy, tip))
         self.boundary = None
         enforced = bool(renderer.config.get('boundary_enforced', True))
         if renderer.config.get('boundary_preview', True) or enforced:
@@ -83,6 +96,7 @@ class TrajectoryMap:
             'show_boundary': bool(renderer.config.get('boundary_preview', True)),
             'boundary_enforced': bool(renderer.config.get('boundary_enforced', True)),
             'floor_estimate': renderer.floor_description,
+            'target': self.target,
         }
         if frame == self.cached_frame and background.is_file():
             return frame
@@ -137,7 +151,6 @@ def draw_trajectory(frame, observations, output):
     directions = np.array([record['heading'] for record in observations]) @ basis
     lengths = np.linalg.norm(directions, axis=1)
     usable = lengths > 1e-6
-    arrows = directions[usable] / lengths[usable, None] * frame['arrow_length']
     steps = np.array([record['observation_id'] for record in observations])
     fig, ax = plt.subplots(figsize=(11, 10), constrained_layout=True)
     temporary = output.with_suffix('.tmp.png')
@@ -165,21 +178,31 @@ def draw_trajectory(frame, observations, output):
                             bbox={'facecolor': 'white', 'alpha': .9, 'edgecolor': 'none'})
         ax.plot(xy[:, 0], xy[:, 1], color='white', linewidth=5, zorder=3)
         segments = np.stack((xy[:-1], xy[1:]), axis=1)
-        line = LineCollection(segments, cmap='plasma', norm=plt.Normalize(1, max(int(steps[-1]), 2)),
-                              linewidths=2.5, zorder=4)
+        colors = matplotlib.colors.LinearSegmentedColormap.from_list(
+            'trajectory_blues', plt.get_cmap('Blues')(np.linspace(.45, .95, 256)))
+        line = LineCollection(segments, cmap=colors, norm=plt.Normalize(1, max(int(steps[-1]), 2)),
+                              linewidths=2.5, zorder=4, label='History')
         line.set_array((steps[:-1] + steps[1:]) / 2)
         ax.add_collection(line)
-        ax.quiver(xy[usable, 0], xy[usable, 1], arrows[:, 0], arrows[:, 1],
-                  angles='xy', scale_units='xy', scale=1, color='#00a8bd',
-                  width=.004, zorder=5, label='Forward direction')
         ax.scatter(*xy[0], s=115, c='#20c56b', edgecolors='black',
                    linewidths=1.2, zorder=7, label='Start')
-        ax.scatter(*xy[-1], s=125, c='#ef3340', marker='X', edgecolors='white',
-                   linewidths=1, zorder=8, label='Current')
+        target = frame.get('target')
+        if target is not None:
+            target_xy = (np.asarray(target['position']) - frame['origin']) @ basis
+            target_direction = np.asarray(target['forward']) @ basis
+            target_length = np.linalg.norm(target_direction)
+            ax.scatter(*target_xy, s=240, c='#ff8c00', marker='*', edgecolors='white',
+                       linewidths=1.2, zorder=10, label='Target view')
+            if target_length > 1e-6:
+                arrow = target_direction / target_length * frame['arrow_length'] * 1.4
+                ax.quiver(*target_xy, *arrow, angles='xy', scale_units='xy', scale=1,
+                          color='#ff8c00', edgecolors='white', linewidths=.5, width=.006, zorder=11)
+        ax.scatter(*xy[-1], s=145, c='#ef3340', marker='X', edgecolors='white',
+                   linewidths=1.2, zorder=20, label='Current')
         if usable[-1]:
             heading = directions[-1] / lengths[-1] * frame['arrow_length']
             ax.quiver(*xy[-1], *heading, angles='xy', scale_units='xy', scale=1,
-                      color='#00dcea', edgecolors='white', linewidths=.5, width=.006, zorder=9)
+                      color='#ef3340', edgecolors='white', linewidths=.5, width=.007, zorder=21)
         preview = (' | boundary limits' if frame.get('boundary_enforced') else ' | boundary preview') if frame.get('boundary') else ''
         if 'approximate' in frame.get('floor_estimate', ''):
             preview += ' | approximate floor'

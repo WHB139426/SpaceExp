@@ -37,7 +37,13 @@ MODEL_SERVER_CONFIG = {
 }
 AGENT_CONFIG = {
     "max_steps": 100,
-    "max_conversation_images": 6,
+    "max_conversation_images": 7,
+}
+TOOL_CONFIG = {
+    'enable_move_backward': True,
+    'enable_move_left': True,
+    'enable_move_right': True,
+    'enable_top_down': False,
 }
 SCENE_CONFIG = {
     "scene_dir": "/data4/haibo/data/3D_Env/scannetpp/307e3262f1",
@@ -50,7 +56,7 @@ SCENE_CONFIG = {
     "trajectory_max_height": 1.8,
     "trajectory_dpi": 180,
     "trajectory_arrow_length": 0.25,
-    "boundary_enforced": True,  # Reject forward moves whose full path leaves the inset region.
+    "boundary_enforced": True,  # Reject translations whose full path leaves the inset region.
     "boundary_preview": True,  # Show the boundary on the local top-down chart.
     "boundary_cell_size": 0.05,
     "boundary_close_radius": 0.15,
@@ -66,7 +72,7 @@ SYSTEM_PROMPT = """You are a spatial agent exploring a reconstructed 3D point-cl
 Use the available tools to gather evidence and complete the user's task.
 
 Visual evidence
-Observations show the current first-person camera view. Inspect each new image before continuing.
+Inspect each new image before continuing, using its view label and any legend to interpret it.
 Images describe the viewpoint when obtained. Point-cloud gaps may be reconstruction artifacts.
 State uncertainty when the visual evidence is insufficient, and answer once you have enough evidence."""
 
@@ -81,7 +87,7 @@ def run_conversation(backend, camera, conversation_path, model_config):
         backend,
         create_protocol(MODEL, **{key: model_config[key] for key in (
             "enable_thinking", "reasoning_effort", "preserve_thinking")}),
-        create_tools(camera, move_step=SCENE_CONFIG["move_step"], look_step=SCENE_CONFIG["look_step"]),
+        create_tools(camera, move_step=SCENE_CONFIG["move_step"], look_step=SCENE_CONFIG["look_step"], **TOOL_CONFIG),
         system_prompt=SYSTEM_PROMPT, **AGENT_CONFIG,
         conversation_path=conversation_path,
     )

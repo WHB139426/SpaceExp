@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+import base64
+import copy
+import mimetypes
+from pathlib import Path
+
 from .types import ModelInput
 
 
@@ -27,6 +32,24 @@ class VLLMBackend:
         self.client = OpenAI(base_url=base_url, api_key="EMPTY", timeout=timeout, max_retries=0)
 
     def generate(self, model_input: ModelInput) -> str:
+        # History retains file paths. Only the outgoing request embeds image bytes.
+        messages = copy.deepcopy(model_input.messages)
+        for message in messages:
+            content = message.get('content')
+            if not isinstance(content, list):
+                continue
+            for part in content:
+                if part.get('type') != 'image_url':
+                    continue
+                url = part['image_url']['url']
+                if url.startswith(('data:', 'http://', 'https://')):
+                    continue
+                path = Path(url).expanduser()
+                media_type = mimetypes.guess_type(path.name)[0]
+                if media_type is None or not media_type.startswith('image/'):
+                    raise ValueError(f'Cannot determine image type: {path}')
+                encoded = base64.b64encode(path.read_bytes()).decode('ascii')
+                part['image_url']['url'] = f'data:{media_type};base64,{encoded}'
         extra_body = {
             "top_k": self.top_k,
             "skip_special_tokens": False,
@@ -34,7 +57,7 @@ class VLLMBackend:
         }
         request = {
             "model": self.model,
-            "messages": model_input.messages,
+            "messages": messages,
             "max_tokens": self.max_tokens,
             "temperature": self.temperature,
             "top_p": self.top_p,

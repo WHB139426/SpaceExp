@@ -16,6 +16,7 @@ class CameraClient:
         output.mkdir(parents=True, exist_ok=True)
         self.log_path = output / 'render.log'
         self.timeout = timeout
+        self.latest_observation = None
         options = json.dumps({'config': config, 'output': str(output)}, allow_nan=False)
         read_fd, write_fd = os.pipe()
         command = [str(blender), '--background', '--factory-startup', '--python-exit-code', '1',
@@ -70,8 +71,22 @@ class CameraClient:
     def action(self, key, magnitude=None):
         return self._observation('action', key=key, magnitude=magnitude)
 
+    def top_down(self):
+        if self.latest_observation is None:
+            raise RuntimeError('No observation is available yet; call camera_observe first.')
+        record = self.latest_observation
+        image = Path(record['image'])
+        metadata = json.loads(image.with_suffix('.json').read_text())
+        top_down = Path(metadata['top_down_image'])
+        if not top_down.is_file():
+            observations = json.loads((image.parent / 'trajectory.json').read_text())
+            draw_trajectory(metadata['top_down_frame'], observations, top_down)
+        # Use the saved step image: top_down.png will be overwritten by later actions.
+        return {'observation_id': record['observation_id'], 'image': str(top_down)}
+
     def _observation(self, operation, **params):
         record = self._request(operation, **params)
+        self.latest_observation = record
         try:
             metadata = json.loads(Path(record['image']).with_suffix('.json').read_text())
             observations = json.loads((Path(record['image']).parent / 'trajectory.json').read_text())
@@ -83,6 +98,7 @@ class CameraClient:
 
     def start_session(self, output):
         self._request('start_session', output=str(output))
+        self.latest_observation = None
         self.log_path = Path(output) / 'render.log'
 
     def _stop(self):

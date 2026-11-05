@@ -4,8 +4,6 @@
 *.pyo
 *.egg-info/
 
-test/
 tmp/*
-eval/*
 outputs/*
 update.sh

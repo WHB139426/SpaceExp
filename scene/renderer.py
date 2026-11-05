@@ -275,7 +275,7 @@ class SceneRenderer:
             directory / 'reconstruction.ply', args)
         for points in point_nodes:
             points.inputs['Radius'].default_value = config['point_radius']
-        first = cameras[0]
+        first = config.get('initial_camera', cameras[0])
         initial_pose = initial_camera_pose(first['extrinsic'])
         self.initial_position = initial_pose.translation.copy()
         self.initial_rotation = initial_pose.to_quaternion().normalized()
@@ -293,11 +293,13 @@ class SceneRenderer:
             heading = self.up.cross(self.initial_rotation @ Vector((1, 0, 0)))
         self.initial_heading = heading.normalized()
         self.intrinsics = configure_first_person(self.camera, first, config['resolution'])
+        if 'initial_camera' in config:
+            self.intrinsics['source'] = 'selected_scene_camera'
         self.crosshair = create_crosshair(self.camera, self.scene)
         self.trajectory_map = TrajectoryMap(self, sample, floor, cloud)
         self.start_session(output)
         print(f'Scene loaded: {directory}; scene up={list(self.up)} ({description}); '
-              'camera pose from the first recorded frame', flush=True)
+              f'camera pose from {first.get("image_path", "the first recorded frame")}', flush=True)
 
     def _apply_pose(self, position, rotation):
         self.camera.location = position
@@ -362,10 +364,12 @@ class SceneRenderer:
         return record
 
     def action(self, key, magnitude=None):
-        if key not in {'move_forward', 'turn_left', 'turn_right', 'turn_up', 'turn_down'}:
-            raise ValueError('Allowed actions: move_forward, turn_left, turn_right, turn_up, turn_down')
+        moves = {'move_forward', 'move_backward', 'move_left', 'move_right'}
+        if key not in moves | {'turn_left', 'turn_right', 'turn_up', 'turn_down'}:
+            raise ValueError('Allowed actions: move_forward, move_backward, move_left, move_right, '
+                             'turn_left, turn_right, turn_up, turn_down')
         if magnitude is None:
-            magnitude = self.config['move_step' if key == 'move_forward' else 'look_step']
+            magnitude = self.config['move_step' if key in moves else 'look_step']
         if type(magnitude) not in (int, float) or not math.isfinite(magnitude) or magnitude <= 0:
             raise ValueError('Magnitude must be a positive finite number')
         position = self.camera.location.copy()
@@ -375,11 +379,14 @@ class SceneRenderer:
         next_heading = heading.copy()
         applied_magnitude = magnitude
         reason = None
-        if key == 'move_forward':
+        if key in moves:
+            right = heading.cross(self.up).normalized()
+            direction = {'move_forward': heading, 'move_backward': -heading,
+                         'move_left': -right, 'move_right': right}[key]
             if self.config.get('boundary_enforced', True):
-                reason = movement_block_reason(self.trajectory_map.boundary, position, heading, magnitude)
+                reason = movement_block_reason(self.trajectory_map.boundary, position, direction, magnitude)
             if reason is None:
-                next_position += heading * magnitude
+                next_position += direction * magnitude
             else:
                 applied_magnitude = 0
         elif key in {'turn_left', 'turn_right'}:

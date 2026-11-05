@@ -113,7 +113,7 @@ def build_boundary(points, *, origin, right, ahead, up, floor, max_height,
 
 
 def movement_block_reason(boundary, position, heading, magnitude):
-    """Check every grid cell touched by the forward segment, including corner crossings."""
+    """Check every grid cell touched by a movement segment, including corner crossings."""
     mask = boundary['allowed_mask']
     height, width = mask.shape
     basis = np.column_stack((boundary['right'], boundary['ahead']))
@@ -127,13 +127,13 @@ def movement_block_reason(boundary, position, heading, magnitude):
     # A segment longer than the grid diagonal cannot fit. Check before multiplying
     # by the magnitude so very large requests never overflow camera coordinates.
     if magnitude > math.hypot(width, height) * boundary['cell_size']:
-        return 'The requested forward path would leave the allowed scene region.'
+        return 'The requested movement path would leave the allowed scene region.'
     delta = np.asarray(heading, dtype=float) @ basis * (magnitude / boundary['cell_size'])
     end = start + delta
     if not np.isfinite(end).all() or not (0 <= end[0] < width and 0 <= end[1] < height):
-        return 'The requested forward path would leave the allowed scene region.'
+        return 'The requested movement path would leave the allowed scene region.'
     end_column, end_row = np.floor(end).astype(int)
-    reason = 'The forward path crosses the scene boundary or its camera-clearance margin.'
+    reason = 'The movement path crosses the scene boundary or its camera-clearance margin.'
 
     # A segment lying exactly on a grid line touches cells on both sides.
     offsets = [(0, 0)]

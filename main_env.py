@@ -18,7 +18,7 @@ SCENE_CONFIG = {
     "trajectory_max_height": 1.8,
     "trajectory_dpi": 180,
     "trajectory_arrow_length": 0.25,
-    "boundary_enforced": True,  # Reject forward moves whose full path leaves the inset region.
+    "boundary_enforced": True,  # Reject translations whose full path leaves the inset region.
     "boundary_preview": True,  # Show the boundary on the local top-down chart.
     "boundary_cell_size": 0.05,
     "boundary_close_radius": 0.15,
@@ -29,9 +29,13 @@ SCENE_CONFIG = {
     "up": None,  # Scene up for ground movement, yaw, and the map; None estimates it from the scene.
 }
 OUTPUT_DIR = str(Path(__file__).resolve().parent / "outputs")
-ACTIONS = {"move_forward", "turn_left", "turn_right", "turn_up", "turn_down"}
+ACTIONS = {"move_forward", "move_backward", "move_left", "move_right",
+           "turn_left", "turn_right", "turn_up", "turn_down"}
 HELP = """Enter one command per line:
   move_forward [distance]  Walk forward horizontally, e.g. move_forward 0.3.
+  move_backward [distance] Walk backward horizontally without turning.
+  move_left [distance]     Strafe left relative to the current horizontal heading.
+  move_right [distance]    Strafe right relative to the current horizontal heading.
   turn_left [degrees]      Turn left, e.g. turn_left 30.
   turn_right [degrees]     Turn right.
   turn_up [degrees]        Look up without changing the walking direction.
@@ -41,7 +45,7 @@ HELP = """Enter one command per line:
   help                    Show these commands.
   /exit                   Quit (also: exit, quit).
 Omit the magnitude to use move_step or look_step from SCENE_CONFIG.
-Forward paths must stay within the inset scene boundary when boundary_enforced is enabled.
+All translation paths must stay within the inset scene boundary when boundary_enforced is enabled.
 Blocked moves keep the camera in place; turns remain available.
 Each observation saves a first-person PNG, camera metadata, and a trajectory chart."""
 
