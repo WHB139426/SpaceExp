@@ -4,11 +4,6 @@
 
 ## 运行
 
-```bash
-pip install -r requirements.txt
-python main_agent.py
-```
-
 在 `main_agent.py` 顶部选择 `MODEL`，并通过 `MODEL_GENERATION_CONFIGS[MODEL]` 设置该模型的生成与 thinking 参数。`MODEL_SERVER_CONFIG` 配置服务地址和超时，`AGENT_CONFIG` 配置工具循环上限和历史图片预算，`SCENE_CONFIG` 集中配置场景目录、Blender 路径、渲染参数和步长。模型名通过 `agent/protocols/__init__.py` 中的字典选择协议。
 
 手动探索使用 `python main_env.py`，无需模型服务。场景和渲染参数在该文件顶部的 `SCENE_CONFIG` 中独立配置。启动后自动保存初始观察，随后每行输入一个动作，例如 `move_forward 0.3`、`turn_left 30`、`turn_up 15`；省略幅度则使用配置的默认步长。`observe` 再次观察，`help` 显示命令，`/new` 在新目录重置环境，`/exit` 退出。输出保存在 `outputs/env_<时间戳>/`；终端显示当前第一视角图片和最新俯视轨迹图的路径，打开保存的 PNG 即可查看。
