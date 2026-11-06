@@ -10,6 +10,10 @@
 
 非交互式图像目标导航使用 `python main_nav.py`。在文件顶部配置 `INITIAL_VIEW`、`GOAL_VIEW` 和英文 `PROMPT`；两张图片必须来自场景的 `frames/` 且能在 `cameras.json` 中匹配。环境从 initial view 的完整相机位姿启动，模型接收两张参考图及任务文本。模型和渲染默认配置复用 `main_agent.py`。
 
+运行 `python generate_benchmark.py` 可生成测试 benchmark。配置位于文件顶部：默认用随机种子 42 打乱 `test.json` 中已重建的 ScanNet++ 场景，依次筛选出 30 个可各生成 10 条任务的场景。按位置、朝向、俯仰和高度分组去重，过滤模糊图像及异常姿态，约束起终点高度差不超过 0.15 米，并尽量平衡近、中、远距离及目标方位。所有任务必须满足原视频的 `initial_frame_index < target_frame_index`，参考路线也只沿视频时间向前。每条参考路线由连续视频位姿投影到起点高度，在该起点对应的外边界网格中逐段检查；不检查家具碰撞，也不将参考路线当作最短路径。生成过程不调用重建或语言模型，使用 Blender 渲染每个场景的俯视图背景。
+
+任务清单写入根目录的 `benchmark_test.json`，`scene` 相对于数据根目录，`initial_view`、`target_view` 和 `reference_route` 中的图片路径相对于场景目录。三栏预览保存到 `benchmark_test_previews/`，可从其中的 `index.md` 查看；每张预览包含起点图片、目标图片和俯视参考路线。`benchmark_test.report.json` 保存筛选参数、候选随机顺序、入选和排除原因，以及建议的成功阈值（位置 0.3 米、视线夹角 15°）；距离配额不足的场景使用其他有效组合补足，并记录实际分布。benchmark 生成不会修改数据集文件或自动运行导航评估。
+
 场景目录需要 `reconstruction.ply` 和 `cameras.json`；无需原视频或 `frames/`，不加载重建模型。初始位置、完整姿态（包括俯仰和侧倾）及内参使用第一帧的记录；仅将 OpenCV 相机坐标转换为 Blender 相机坐标，不调平、不修改眼高。渲染继续采用 `resolution` 指定的方形画面，保留原水平视场并扩展竖直视场。
 
 ## 模型工具

@@ -2,6 +2,7 @@
 
 from datetime import datetime
 import json
+import os
 from pathlib import Path
 import shutil
 
@@ -21,14 +22,22 @@ from main_agent import (
 )
 from scene.client import CameraClient
 
+def load_json(path):
+    with open(path) as f:
+        data = json.load(f)
+    return data
+
+test_data = load_json('/data4/haibo/code/SpaceExp/benchmark_test.json')
+sample = test_data[33]
+print(sample)
 
 SCENE_CONFIG = {
     **DEFAULT_SCENE_CONFIG,
-    'scene_dir': '/data4/haibo/data/3D_Env/scannetpp/307e3262f1',
+    'scene_dir': os.path.join('/data4/haibo/data/3D_Env', sample['scene']),
 }
 # Example frames. Paths may be absolute or relative to scene_dir.
-INITIAL_VIEW = 'frames/frame_000000.jpg'
-GOAL_VIEW = 'frames/frame_012039.jpg'
+INITIAL_VIEW = sample['initial_view']
+GOAL_VIEW = sample['target_view']
 PROMPT = """Navigate from the initial view to the location and viewing direction shown in the goal view.
 The camera starts at the recorded pose of the initial view. The goal view is a reference, not a current observation.
 Use the camera tools to inspect the current rendered scene and navigate toward the goal.
