@@ -1,19 +1,26 @@
 """Model-specific message preparation and output parsing."""
 
 from ..types import ChatProtocol
+from .openai import OpenAIProtocol
 from .qwen import QwenProtocol
 
 
-PROTOCOLS = {"qwen": QwenProtocol}
-MODEL_PROTOCOLS = {
-    "qwen3.8-27b": "qwen",
-    "qwen3.8-flash-next": "qwen",
+PROTOCOLS = {"qwen": QwenProtocol, "openai": OpenAIProtocol}
+MODEL_ADAPTERS = {
+    "qwen3.8-27b": {"backend": "vllm", "protocol": "qwen"},
+    "qwen3.8-flash-next": {"backend": "vllm", "protocol": "qwen"},
+    "gpt-6-astra": {"backend": "openai", "protocol": "openai"},
+    "gpt-6.1-sol": {"backend": "openai", "protocol": "openai"},
+    "gpt-6.1-terra": {"backend": "openai", "protocol": "openai"},
+    "gpt-6-sol": {"backend": "openai", "protocol": "openai"},
+    "gpt-6-luna": {"backend": "openai", "protocol": "openai"},
 }
+MODEL_PROTOCOLS = {model: adapter['protocol'] for model, adapter in MODEL_ADAPTERS.items()}
 
 
 def create_protocol(model: str, **options) -> ChatProtocol:
     if model not in MODEL_PROTOCOLS:
-        raise ValueError(f"No protocol registered for model: {model!r}. Add it to MODEL_PROTOCOLS.")
+        raise ValueError(f"No protocol registered for model: {model!r}. Add it to MODEL_ADAPTERS.")
     name = MODEL_PROTOCOLS[model]
     if name not in PROTOCOLS:
         raise ValueError(f"Unknown protocol: {name!r}. Available: {', '.join(PROTOCOLS)}")

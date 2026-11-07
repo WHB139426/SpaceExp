@@ -4,9 +4,21 @@
 
 ## 运行
 
-在 `main_agent.py` 顶部选择 `MODEL`，并通过 `MODEL_GENERATION_CONFIGS[MODEL]` 设置该模型的生成与 thinking 参数。`MODEL_SERVER_CONFIG` 配置服务地址和超时，`AGENT_CONFIG` 配置工具循环上限和历史图片预算，`SCENE_CONFIG` 集中配置场景目录、Blender 路径、渲染参数和步长。模型名通过 `agent/protocols/__init__.py` 中的字典选择协议。
+在 `main_agent.py` 顶部选择 `MODEL`，并通过 `MODEL_GENERATION_CONFIGS[MODEL]` 设置该模型的生成与 thinking 参数。`MODEL_SERVER_CONFIG` 按 `vllm` / `openai` 分别配置服务地址和超时，`AGENT_CONFIG` 配置工具循环上限、历史图片预算和 `verbose` 输出，`SCENE_CONFIG` 集中配置场景目录、Blender 路径、渲染参数和步长。`agent/protocols/__init__.py` 的 `MODEL_ADAPTERS` 字典显式指定每个模型的 backend 和 protocol，两个 agent 入口共用 `agent.models.create_model` 工厂。
 
-手动探索使用 `python main_env.py`，无需模型服务。场景和渲染参数在该文件顶部的 `SCENE_CONFIG` 中独立配置。启动后自动保存初始观察，随后每行输入一个动作，例如 `move_forward 0.3`、`turn_left 30`、`turn_up 15`；省略幅度则使用配置的默认步长。`observe` 再次观察，`help` 显示命令，`/new` 在新目录重置环境，`/exit` 退出。输出保存在 `outputs/env_<时间戳>/`；终端显示当前第一视角图片和最新俯视轨迹图的路径，打开保存的 PNG 即可查看。
+GPT-6 使用 `MODEL = "gpt-6-astra"`，然后设置环境变量并启动：
+
+```bash
+export OPENAI_API_KEY="your_api_key_here"
+python main_agent.py
+# Or: python main_nav.py
+```
+
+GPT 使用官方 Responses API；Qwen 继续使用本地 vLLM Chat Completions 和 Qwen 文本工具协议。GPT 默认 `reasoning_effort="high"`、`reasoning_summary="auto"`，不传 Qwen 的采样和模板参数。所有模型共用相机工具、动作开关、场景渲染和 agent loop。GPT 每轮自动选择工具或结束回答，最多调用一个工具；不会强制连续移动。`verbose=True` 打印每轮工具调用、GPT 推理摘要（若有）和 token usage；摘要不是原始 CoT。
+
+GPT 使用 `store=False`，每轮由本地重传历史，不使用 `previous_response_id` 或服务器会话。每个 assistant 消息的 `response_items` 保存完整原生输出，包括原始工具调用、消息 phase 和不可读的加密推理状态；下一轮原样回传，`reasoning_summary` 仅供阅读。`usage` 和 `response_id` 也记录在 `conversation.json`。图片历史仍采用现有预算；导航保留 initial/target，较旧观察图片替换为文字，发送请求时才嵌入仍保留的图片。`/new` 清空这些历史和推理状态，旧会话文件保持不变。图片被移除后，已有文字和推理状态仍可能保留对旧图片的理解。
+
+手动探索使用 `python main_env.py`，无需模型服务。场景和渲染参数在该文件顶部的 `SCENE_CONFIG` 中独立配置。启动后自动保存初始观察，随后每行输入一个动作，例如 `move_forward 0.3`、`turn_left 30`、`turn_up 15`；省略幅度则使用配置的默认步长。`observe` 再次观察，`help` 显示命令，`/new` 在新目录重置环境，`/exit` 退出。输出保存在 `outputs/env_<场景名>_<时间戳>/`；终端显示当前第一视角图片和最新俯视轨迹图的路径，打开保存的 PNG 即可查看。
 
 非交互式图像目标导航使用 `python main_nav.py`。在文件顶部配置 `INITIAL_VIEW`、`GOAL_VIEW` 和英文 `PROMPT`；两张图片必须来自场景的 `frames/` 且能在 `cameras.json` 中匹配。环境从 initial view 的完整相机位姿启动，模型接收两张参考图及任务文本。模型和渲染默认配置复用 `main_agent.py`。
 
@@ -34,9 +46,9 @@
 
 ## 会话输出
 
-Agent 每次启动在 `outputs/chat_<时间戳>/` 保存 `conversation.json`、观察 PNG、对应相机元数据 JSON 和 Blender 的 `render.log`。动作图片及配套 JSON、轨迹图的文件名包含动作和幅度，例如 `0002_move_forward_0.3.png`、`0002_move_forward_0.3.json`、`0002_move_forward_0.3_top_down.png`；被边界阻止的动作追加 `_blocked`，例如 `0003_move_forward_100_blocked.png`。普通观察仍为 `0001_observe.png`。另外覆盖更新一张 `top_down.png` 方便查看最新状态。两个入口使用同一套渲染与记录逻辑。
+Agent 每次启动在 `outputs/chat_<场景名>_<模型名>_<时间戳>/` 保存 `conversation.json`、观察 PNG、对应相机元数据 JSON 和 Blender 的 `render.log`。动作图片及配套 JSON、轨迹图的文件名包含动作和幅度，例如 `0002_move_forward_0.3.png`、`0002_move_forward_0.3.json`、`0002_move_forward_0.3_top_down.png`；被边界阻止的动作追加 `_blocked`，例如 `0003_move_forward_100_blocked.png`。普通观察仍为 `0001_observe.png`。另外覆盖更新一张 `top_down.png` 方便查看最新状态。两个入口使用同一套渲染与记录逻辑。
 
-导航输出保存在 `outputs/nav_<时间戳>/`，额外保存 `initial_view.jpg`、`target_view.jpg`（保留原图片扩展名）和 `task.json`。参考图直接复制原文件，`task.json` 保存对应相机记录供本地检查；目标相机矩阵不作为文本发送给模型；启用俯视图工具后，模型可以通过地图标记看到目标位置和朝向。
+导航输出保存在 `outputs/nav_<场景名>_<模型名>_<时间戳>/`，额外保存 `initial_view.jpg`、`target_view.jpg`（保留原图片扩展名）和 `task.json`。参考图直接复制原文件，`task.json` 保存对应相机记录供本地检查；目标相机矩阵不作为文本发送给模型；启用俯视图工具后，模型可以通过地图标记看到目标位置和朝向。
 
 本地俯视图用蓝色渐变绘制历史轨迹，红色 X 和红色箭头表示当前位置及前进方向，绿色圆点表示起点。导航任务额外显示橙色目标星标及目标镜头视线在地面上的投影箭头；视线垂直地面时只显示位置。显示范围包含目标标记，当前位置和朝向绘制在最上层。
 
@@ -89,7 +101,7 @@ Requires `transformers>=5.8.0`. Uses the native 262,144-token context window
 without RoPE scaling overrides.
 
 ```bash
-CUDA_VISIBLE_DEVICES=2 \
+CUDA_VISIBLE_DEVICES=3 \
 VLLM_ENGINE_READY_TIMEOUT_S=3600 \
 vllm serve /data4/haibo/weights/Qwen3.8-27B-FP8 \
   --served-model-name qwen3.8-27b \

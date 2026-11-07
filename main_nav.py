@@ -5,10 +5,11 @@ import json
 import os
 from pathlib import Path
 import shutil
+import random
+import numpy as np
 
 from agent import Agent
-from agent.backend import VLLMBackend
-from agent.protocols import create_protocol
+from agent.models import create_model
 from agent.tools import create_tools
 from main_agent import (
     AGENT_CONFIG as DEFAULT_AGENT_CONFIG,
@@ -22,14 +23,22 @@ from main_agent import (
 )
 from scene.client import CameraClient
 
+
+def init_seeds(seed=42,):
+    random.seed(seed)
+    np.random.seed(seed)
+
 def load_json(path):
     with open(path) as f:
         data = json.load(f)
     return data
 
 test_data = load_json('/data4/haibo/code/SpaceExp/benchmark_test.json')
-sample = test_data[33]
+
+init_seeds(33)
+sample = random.choice(test_data)
 print(sample)
+
 
 SCENE_CONFIG = {
     **DEFAULT_SCENE_CONFIG,
@@ -83,7 +92,7 @@ def main():
     config = {**SCENE_CONFIG, 'scene_dir': str(scene_dir),
               'initial_camera': initial_camera, 'target_camera': goal_camera}
     output = (Path(OUTPUT_DIR).expanduser().resolve()
-              / datetime.now().strftime('nav_%Y%m%d_%H%M%S_%f'))
+              / f'nav_{scene_dir.name}_{MODEL}_{datetime.now():%Y%m%d_%H%M%S_%f}')
     output.mkdir(parents=True, exist_ok=False)
     initial_copy = output / f'initial_view{initial_path.suffix.lower()}'
     goal_copy = output / f'target_view{goal_path.suffix.lower()}'
@@ -101,20 +110,18 @@ def main():
         'scene_dir': str(scene_dir), 'initial_view': str(initial_copy), 'goal_view': str(goal_copy),
         'prompt': PROMPT, 'initial_camera': initial_camera, 'goal_camera': goal_camera,
         'tool_config': TOOL_CONFIG,
+        'model': MODEL, 'model_config': MODEL_GENERATION_CONFIGS[MODEL],
+        'agent_config': AGENT_CONFIG,
     }, indent=2) + '\n')
 
     model_config = MODEL_GENERATION_CONFIGS[MODEL]
-    backend = VLLMBackend(
-        MODEL, **MODEL_SERVER_CONFIG,
-        **{key: model_config[key] for key in ('max_tokens', 'temperature', 'top_p', 'top_k')},
-    )
+    backend, protocol = create_model(MODEL, model_config, MODEL_SERVER_CONFIG)
     try:
         with CameraClient(config['blender'], config, output, timeout=config['timeout']) as camera:
             camera.observe()  # Record the actual starting pose and its local trajectory map.
             agent = Agent(
                 backend,
-                create_protocol(MODEL, **{key: model_config[key] for key in (
-                    'enable_thinking', 'reasoning_effort', 'preserve_thinking')}),
+                protocol,
                 create_tools(camera, move_step=config['move_step'], look_step=config['look_step'], **TOOL_CONFIG),
                 system_prompt=SYSTEM_PROMPT, **AGENT_CONFIG,
                 conversation_path=output / 'conversation.json',

@@ -51,6 +51,7 @@ class Agent:
         max_conversation_images: int,
         conversation_path: str | Path | None = None,
         preserve_prompt_images: bool = False,
+        verbose: bool = False,
     ) -> None:
         if max_steps < 1:
             raise ValueError("max_steps must be at least 1")
@@ -65,6 +66,7 @@ class Agent:
         self.max_steps = max_steps
         self.max_conversation_images = max_conversation_images
         self.preserve_prompt_images = preserve_prompt_images
+        self.verbose = verbose
         self.conversation_path = Path(conversation_path) if conversation_path is not None else None
         self.reset()
 
@@ -92,8 +94,18 @@ class Agent:
             assistant = self.protocol.parse(self.model.generate(self.protocol.render(self.messages, schemas)))
             self.messages.append(assistant)
             self._save()
+            if self.verbose:
+                if 'reasoning_summary' in assistant:
+                    print('Reasoning summary:\n' + (assistant['reasoning_summary'] or '(No summary returned.)'),
+                          flush=True)
+                for call in assistant.get('tool_calls', []):
+                    print('Tool call:', json.dumps(call['function'], ensure_ascii=False), flush=True)
+                if assistant.get('usage') is not None:
+                    print('Usage:', json.dumps(assistant['usage'], ensure_ascii=False), flush=True)
             calls = assistant.get("tool_calls", [])
             if not calls:
+                if assistant.get('continue_generation'):
+                    continue
                 return str(assistant.get("content", ""))
 
             results = []

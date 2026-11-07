@@ -51,8 +51,9 @@ Each observation saves a first-person PNG, camera metadata, and a trajectory cha
 
 
 def new_session_dir() -> Path:
+    scene_name = Path(SCENE_CONFIG['scene_dir']).expanduser().resolve().name
     return (Path(OUTPUT_DIR).expanduser().resolve()
-            / datetime.now().strftime("env_%Y%m%d_%H%M%S_%f"))
+            / f"env_{scene_name}_{datetime.now():%Y%m%d_%H%M%S_%f}")
 
 
 def show_observation(record):

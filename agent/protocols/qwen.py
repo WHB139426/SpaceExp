@@ -7,7 +7,7 @@ import json
 import re
 import uuid
 
-from ..types import Message, ModelInput
+from ..types import Message, ModelInput, ModelOutput
 
 
 TOOL_CALL_RE = re.compile(
@@ -50,7 +50,9 @@ class QwenProtocol:
             },
         )
 
-    def parse(self, text: str) -> Message:
+    def parse(self, text: ModelOutput) -> Message:
+        if not isinstance(text, str):
+            raise TypeError('Qwen protocol expects native tool-call text')
         text = STOP_TOKEN_RE.sub("", text).strip()
         reasoning = ""
         content = text

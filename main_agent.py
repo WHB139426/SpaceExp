@@ -4,8 +4,7 @@ from datetime import datetime
 from pathlib import Path
 
 from agent import Agent
-from agent.backend import VLLMBackend
-from agent.protocols import create_protocol
+from agent.models import create_model
 from agent.tools import create_tools
 from scene.client import CameraClient
 
@@ -30,14 +29,37 @@ MODEL_GENERATION_CONFIGS = {
         "reasoning_effort": "medium",  # "low", "medium", "xhigh"
         "preserve_thinking": True,
     },
+    "gpt-6-astra": {
+        "max_output_tokens": 32 * 1024,
+        "reasoning_effort": "high", # "low", "medium", "high", "xhigh", "max"
+        "reasoning_summary": "auto",
+    },
+    "gpt-6.1-sol": {
+        "max_output_tokens": 16 * 1024,
+        "reasoning_effort": "medium",  # "low", "medium", "high", "xhigh", "max"
+        "reasoning_summary": "auto",
+    },
+    "gpt-6.1-terra": {
+        "max_output_tokens": 16 * 1024,
+        "reasoning_effort": "medium", # "low", "medium", "high", "xhigh", "max"
+        "reasoning_summary": "auto",
+    },
 }
 MODEL_SERVER_CONFIG = {
-    "base_url": "http://127.0.0.1:8000/v1",
-    "timeout": 180,
+    "vllm": {
+        "base_url": "http://127.0.0.1:8000/v1",
+        "timeout": 180,
+    },
+    "openai": {
+        "base_url": "https://api.openai.com/v1",
+        "timeout": 300,
+        # api_key is read from OPENAI_API_KEY by the SDK.
+    },
 }
 AGENT_CONFIG = {
     "max_steps": 100,
     "max_conversation_images": 7,
+    "verbose": True,  # Print tool calls, OpenAI reasoning summaries and usage.
 }
 TOOL_CONFIG = {
     'enable_move_backward': True,
@@ -78,15 +100,15 @@ State uncertainty when the visual evidence is insufficient, and answer once you 
 
 
 def new_conversation_path() -> Path:
+    scene_name = Path(SCENE_CONFIG['scene_dir']).expanduser().resolve().name
     return (Path(OUTPUT_DIR).expanduser().resolve()
-            / datetime.now().strftime("chat_%Y%m%d_%H%M%S_%f") / "conversation.json")
+            / f"chat_{scene_name}_{MODEL}_{datetime.now():%Y%m%d_%H%M%S_%f}" / "conversation.json")
 
 
-def run_conversation(backend, camera, conversation_path, model_config):
+def run_conversation(backend, protocol, camera, conversation_path):
     agent = Agent(
         backend,
-        create_protocol(MODEL, **{key: model_config[key] for key in (
-            "enable_thinking", "reasoning_effort", "preserve_thinking")}),
+        protocol,
         create_tools(camera, move_step=SCENE_CONFIG["move_step"], look_step=SCENE_CONFIG["look_step"], **TOOL_CONFIG),
         system_prompt=SYSTEM_PROMPT, **AGENT_CONFIG,
         conversation_path=conversation_path,
@@ -117,10 +139,7 @@ def run_conversation(backend, camera, conversation_path, model_config):
 
 def main():
     model_config = MODEL_GENERATION_CONFIGS[MODEL]
-    backend = VLLMBackend(
-        MODEL, **MODEL_SERVER_CONFIG,
-        **{key: model_config[key] for key in ("max_tokens", "temperature", "top_p", "top_k")},
-    )
+    backend, protocol = create_model(MODEL, model_config, MODEL_SERVER_CONFIG)
     try:
         config = {
             **SCENE_CONFIG,
@@ -128,7 +147,7 @@ def main():
         }
         conversation_path = new_conversation_path()
         with CameraClient(config['blender'], config, conversation_path.parent, timeout=config['timeout']) as camera:
-            run_conversation(backend, camera, conversation_path, model_config)
+            run_conversation(backend, protocol, camera, conversation_path)
     finally:
         backend.client.close()
     return 0

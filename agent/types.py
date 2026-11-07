@@ -2,28 +2,30 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable, Protocol
 
 
 Message = dict[str, object]
+ModelOutput = str | dict[str, object]
 
 
 @dataclass(frozen=True)
 class ModelInput:
     messages: list[Message]
     tools: list[dict[str, object]]
-    chat_template_kwargs: dict[str, object]
+    chat_template_kwargs: dict[str, object] = field(default_factory=dict)
+    instructions: str = ""
 
 
 class Model(Protocol):
-    def generate(self, model_input: ModelInput) -> str: ...
+    def generate(self, model_input: ModelInput) -> ModelOutput: ...
 
 
 class ChatProtocol(Protocol):
     def render(self, messages: list[Message], tools: list[dict[str, object]]) -> ModelInput: ...
 
-    def parse(self, text: str) -> Message: ...
+    def parse(self, output: ModelOutput) -> Message: ...
 
 
 @dataclass(frozen=True)
