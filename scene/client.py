@@ -10,6 +10,25 @@ import sys
 from .trajectory import draw_trajectory
 
 
+def reference_camera_state(frame, image):
+    """Export a recorded OpenCV camera with world-space axes matching rendered observations."""
+    import numpy as np
+
+    pose = np.linalg.inv(np.asarray(frame['extrinsic'], dtype=float))
+    if pose.shape != (4, 4) or not np.isfinite(pose).all():
+        raise ValueError('Reference camera must have a finite 4x4 pose')
+    forward, up = pose[:3, 2], -pose[:3, 1]
+    forward_length, up_length = np.linalg.norm(forward), np.linalg.norm(up)
+    if min(forward_length, up_length) < 1e-12:
+        raise ValueError('Reference camera has a degenerate orientation')
+    return {
+        **frame, 'image': str(Path(image).expanduser().resolve()),
+        'position': pose[:3, 3].tolist(),
+        'forward': (forward / forward_length).tolist(), 'up': (up / up_length).tolist(),
+        'camera_to_world': pose.tolist(), 'extrinsic_convention': 'world_to_camera_opencv',
+    }
+
+
 class CameraClient:
     def __init__(self, blender, config, output, *, timeout=300):
         output = Path(output)
@@ -70,6 +89,9 @@ class CameraClient:
 
     def action(self, key, magnitude=None):
         return self._observation('action', key=key, magnitude=magnitude)
+
+    def reset(self):
+        return self._observation('reset')
 
     def top_down(self):
         if self.latest_observation is None:

@@ -1,4 +1,4 @@
-"""Generate image-goal navigation tasks from held-out ScanNet++ scenes."""
+"""Generate image-goal navigation tasks from all reconstructed test scenes."""
 
 from collections import Counter
 import hashlib
@@ -17,29 +17,36 @@ from scene.boundary import build_boundary, movement_block_reason
 
 DATA_ROOT = Path('/data4/haibo/data/3D_Env')
 TEST_SPLIT = DATA_ROOT / 'test.json'
-OUTPUT_JSON = Path(__file__).resolve().parent / 'benchmark_test.json'
-PREVIEW_DIR = Path(__file__).resolve().parent / 'benchmark_test_previews'
+OUTPUT_DIR = Path(__file__).resolve().parent / 'outputs'
+OUTPUT_JSON = OUTPUT_DIR / 'benchmark_test.json'
+PREVIEW_DIR = OUTPUT_DIR / 'benchmark_test_previews'
 SEED = 42
-NUM_SCENES = 50
-TASKS_PER_SCENE = 10
-DISTANCE_QUOTAS = {'near': 3, 'medium': 4, 'far': 3}
+TASKS_PER_SCENE = 6  # Upper limit; accept scenes with fewer valid tasks.
+DISTANCE_QUOTAS = {'near': 2, 'medium': 2, 'far': 2}  # Selection preferences, not required counts.
 POSITION_BIN = 0.5  # Meters in the reconstructed scene.
 HEADING_BIN_DEGREES = 45
 PITCH_BIN_DEGREES = 30
 HEIGHT_BIN = 0.15
 MIN_DISTANCE = 0.75
 MAX_HEIGHT_DIFFERENCE = 0.15
-MAX_ABS_ROLL_DEGREES = 20
+MAX_ABS_ROLL_DEGREES = 5  # Both initial and target views must be nearly upright.
 MAX_ROLL_DIFFERENCE_DEGREES = 10
 MAX_ABS_PITCH_DEGREES = 60
+MAX_TARGET_PITCH_DEGREES = 20  # Positive means looking up relative to the estimated ground plane.
 MIN_CONTRAST = 8
 MIN_SHARPNESS = 10  # Laplacian variance after thumbnailing.
 MAX_POSE_STEP = 1.5
 MAX_POSE_SPEED = 3.0
 MAX_REFERENCE_DETOUR = 6.0
 MAX_INITIAL_ATTEMPTS = 20
-MAX_TASKS_PER_INITIAL = 2
-MAX_TARGET_REUSE = 2
+MAX_TASKS_PER_INITIAL = 1
+MAX_TARGET_REUSE = 1
+VIEW_DEDUP_DISTANCE = 0.5  # Ground distance; all three limits must hold to reject a view.
+VIEW_DEDUP_HEIGHT = 0.15
+VIEW_DEDUP_ANGLE_DEGREES = 30  # Full optical viewing direction, including pitch.
+TARGET_SPREAD_WEIGHT = 1.0
+ROUTE_GRID_SIZE = 0.5  # Separate from the environment's boundary grid.
+ROUTE_OVERLAP_WEIGHT = 1.0  # Soft penalty, not a collision check or hard rejection.
 SUCCESS_DISTANCE = 0.3
 SUCCESS_VIEW_ANGLE_DEGREES = 15
 MAP_CONFIG = {
@@ -64,7 +71,8 @@ def write_json(path, value):
 
 def eligible_scenes():
     scenes = sorted({name for name in json.loads(TEST_SPLIT.read_text())
-                     if len(Path(name).parts) == 2 and Path(name).parts[0] == 'scannetpp'})
+                     if len(Path(name).parts) == 2 and not Path(name).is_absolute()
+                     and '..' not in Path(name).parts})
     return [name for name in scenes if all((DATA_ROOT / name / file).is_file()
                                           for file in ('cameras.json', 'reconstruction.ply'))]
 
@@ -99,7 +107,7 @@ def candidates(directory, cameras, poses, up, frame):
     yaw = np.degrees(np.arctan2(heading @ basis[:, 0], heading @ basis[:, 1])) % 360
     groups = {}
     for i, camera in enumerate(cameras):
-        if abs(roll[i]) > MAX_ABS_ROLL_DEGREES or abs(pitch[i]) > MAX_ABS_PITCH_DEGREES:
+        if abs(roll[i]) > MAX_ABS_ROLL_DEGREES + 1e-6 or abs(pitch[i]) > MAX_ABS_PITCH_DEGREES:
             continue
         path = (directory / camera['image_path']).resolve()
         if not path.is_relative_to((directory / 'frames').resolve()) or not path.is_file():
@@ -141,14 +149,45 @@ def route_prefix(boundary, positions, up, initial, valid_steps):
     return np.r_[0, np.cumsum(~valid)]
 
 
+def near_duplicate_view(index, selected, xy, heights, forward):
+    """Compare against already selected views in the same endpoint role."""
+    if not selected:
+        return False
+    others = np.asarray(selected, dtype=int)
+    angles = np.degrees(np.arccos(np.clip(forward[others] @ forward[index], -1, 1)))
+    return bool(np.any((np.linalg.norm(xy[others] - xy[index], axis=1) < VIEW_DEDUP_DISTANCE)
+                       & (np.abs(heights[others] - heights[index]) < VIEW_DEDUP_HEIGHT)
+                       & (angles < VIEW_DEDUP_ANGLE_DEGREES)))
+
+
+def route_footprint(route):
+    """Approximate ground coverage, sampling each segment at most half a cell apart."""
+    cells = set()
+    for start, end in zip(route[:-1], route[1:]):
+        steps = max(1, int(np.ceil(np.linalg.norm(end - start) / (ROUTE_GRID_SIZE / 2))))
+        samples = np.linspace(start, end, steps + 1)
+        cells.update(map(tuple, np.floor(samples / ROUTE_GRID_SIZE).astype(int)))
+    if len(route) == 1:
+        cells.add(tuple(np.floor(route[0] / ROUTE_GRID_SIZE).astype(int)))
+    return frozenset(cells)
+
+
+def route_overlap(cells, other):
+    # A short route wholly contained in a long route counts as full overlap.
+    return len(cells & other) / min(len(cells), len(other)) if cells and other else 0.0
+
+
 def choose_pairs(directory, cameras, poses, frame, points, rng):
     up = np.asarray(frame['up'], dtype=float)
     up /= np.linalg.norm(up)
     indices, positions, heading, roll, heights, xy = candidates(directory, cameras, poses, up, frame)
+    forward = poses[:, :3, 2].copy()
+    forward /= np.linalg.norm(forward, axis=1, keepdims=True)
+    pitch = np.degrees(np.arcsin(np.clip(forward @ up, -1, 1)))
     with np.load(frame['boundary']) as saved:
         boundary = dict(saved)
     indices = [i for i in indices if movement_block_reason(boundary, positions[i], heading[i], 0) is None]
-    if len(indices) < 5:
+    if len(indices) < 2:
         raise ValueError(f'Only {len(indices)} usable position/orientation representatives')
     ids = np.asarray(indices)
     frame_indices = np.asarray([camera['video_frame_index'] for camera in cameras])
@@ -156,9 +195,10 @@ def choose_pairs(directory, cameras, poses, frame, points, rng):
     compatible = ((distances >= MIN_DISTANCE)
                   & (frame_indices[ids, None] < frame_indices[ids][None, :])
                   & (np.abs(heights[ids, None] - heights[ids][None, :]) <= MAX_HEIGHT_DIFFERENCE)
-                  & (np.abs(roll[ids, None] - roll[ids][None, :]) <= MAX_ROLL_DIFFERENCE_DEGREES))
+                  & (np.abs(roll[ids, None] - roll[ids][None, :]) <= MAX_ROLL_DIFFERENCE_DEGREES + 1e-6)
+                  & (pitch[ids][None, :] <= MAX_TARGET_PITCH_DEGREES + 1e-6))
     if not compatible.any():
-        raise ValueError('No forward-in-time pairs satisfy distance, height, and roll constraints')
+        raise ValueError('No forward-in-time pairs satisfy distance, height, roll, and target-pitch constraints')
     cuts = np.quantile(distances[compatible], [1 / 3, 2 / 3])
     distance_groups = np.searchsorted(cuts, distances, side='left')
     labels = ['near', 'medium', 'far']
@@ -168,13 +208,26 @@ def choose_pairs(directory, cameras, poses, frame, points, rng):
     valid_steps = ((dt > 0) & (steps <= MAX_POSE_STEP)
                    & (steps / np.maximum(dt, 1e-9) <= MAX_POSE_SPEED))
     path_lengths = np.r_[0, np.cumsum(np.linalg.norm(np.diff(xy, axis=0), axis=1))]
+    # Invalid pose jumps cannot belong to a reference route; never rasterize them.
+    segment_cells = [route_footprint(xy[k:k + 2]) if valid_steps[k] else frozenset()
+                     for k in range(len(xy) - 1)]
+    scene_scale = max(float(distances.max()), MIN_DISTANCE)
+    initial_views, target_views, selected_routes = [], [], []
+    initial_duplicates, target_duplicates = 0, 0
     group_counts, bearing_counts, angle_counts, target_uses = Counter(), Counter(), Counter(), Counter()
     remaining, attempted, selected = np.flatnonzero(compatible.any(axis=1)).tolist(), [], []
     while remaining and len(selected) < TASKS_PER_SCENE and len(attempted) < MAX_INITIAL_ATTEMPTS:
+        diverse = [a for a in remaining
+                   if not near_duplicate_view(int(ids[a]), initial_views, xy, heights, forward)]
+        initial_duplicates += len(remaining) - len(diverse)
+        remaining = diverse
+        if not remaining:
+            break
         if not attempted:
             a = int(rng.choice(remaining))
         else:
-            spread = np.min(np.linalg.norm(xy[ids[remaining], None] - xy[ids[attempted]][None, :], axis=2), axis=1)
+            anchors = initial_views if initial_views else ids[attempted]
+            spread = np.min(np.linalg.norm(xy[ids[remaining], None] - xy[anchors][None, :], axis=2), axis=1)
             a = remaining[int(np.argmax(spread + rng.uniform(0, 1e-8, len(remaining))))]
         remaining.remove(a)
         attempted.append(a)
@@ -189,6 +242,11 @@ def choose_pairs(directory, cameras, poses, frame, points, rng):
         choices = []
         for b in possible:
             j = int(ids[b])
+            if target_uses[j] >= MAX_TARGET_REUSE:
+                continue
+            if near_duplicate_view(j, target_views, xy, heights, forward):
+                target_duplicates += 1
+                continue
             length = float(path_lengths[j] - path_lengths[i])
             if invalid_prefix[j] != invalid_prefix[i] or length > distances[a, b] * MAX_REFERENCE_DETOUR:
                 continue
@@ -199,19 +257,32 @@ def choose_pairs(directory, cameras, poses, frame, points, rng):
                     else 'right' if bearing > 0 else 'left')
             angle = float(np.degrees(np.arccos(np.clip(np.dot(poses[i, :3, 2], poses[j, :3, 2]), -1, 1))))
             turn = 'small_turn' if angle < 45 else 'medium_turn' if angle < 120 else 'large_turn'
-            choices.append((b, j, length, side, angle, turn))
+            cells = frozenset().union(*segment_cells[i:j])
+            choices.append((b, j, length, side, angle, turn, cells))
         for _ in range(MAX_TASKS_PER_INITIAL):
-            available = [choice for choice in choices if target_uses[choice[1]] < MAX_TARGET_REUSE]
+            available = [choice for choice in choices if target_uses[choice[1]] < MAX_TARGET_REUSE
+                         and not near_duplicate_view(choice[1], target_views, xy, heights, forward)]
             if not available or len(selected) >= TASKS_PER_SCENE:
                 break
+            def diversity(choice):
+                j, cells = choice[1], choice[6]
+                spread = float(np.min(np.linalg.norm(xy[target_views] - xy[j], axis=1))) if target_views else None
+                overlap = max((route_overlap(cells, other) for other in selected_routes), default=0.0)
+                return spread, overlap
+
             def priority(choice):
-                b, j, _, side, _, turn = choice
+                b, j, _, side, _, turn, _ = choice
                 group = labels[distance_groups[a, b]]
+                spread, overlap = diversity(choice)
+                coverage = 1 / (1 + bearing_counts[side]) + 1 / (1 + angle_counts[turn])
+                score = (coverage + TARGET_SPREAD_WEIGHT * (spread / scene_scale if spread is not None else 0)
+                         - ROUTE_OVERLAP_WEIGHT * overlap)
                 return (max(DISTANCE_QUOTAS[group] - group_counts[group], 0),
-                        -bearing_counts[side], -angle_counts[turn], -target_uses[j], rng.random())
+                        score, -target_uses[j], rng.random())
             choice = max(available, key=priority)
             choices.remove(choice)
-            b, j, length, side, angle, turn = choice
+            b, j, length, side, angle, turn, cells = choice
+            spread, overlap = diversity(choice)
             group = labels[distance_groups[a, b]]
             selected.append({
                 'initial_index': i, 'target_index': j,
@@ -219,18 +290,30 @@ def choose_pairs(directory, cameras, poses, frame, points, rng):
                 'distance_group': group, 'target_bearing': side, 'orientation_group': turn,
                 'ground_distance_m': round(float(distances[a, b]), 4),
                 'height_difference_m': round(float(abs(heights[i] - heights[j])), 4),
+                'target_pitch_degrees': round(float(pitch[j]), 3),
+                'initial_roll_degrees': round(float(roll[i]), 3),
+                'target_roll_degrees': round(float(roll[j]), 3),
                 'view_angle_degrees': round(angle, 3), 'reference_path_length_m': round(length, 4),
+                'target_spread_m': round(spread, 4) if spread is not None else None,
+                'max_route_overlap': round(overlap, 4),
                 'route_indices': list(range(i, j + 1)),
             })
+            initial_views.append(i)
+            target_views.append(j)
+            selected_routes.append(cells)
             group_counts[group] += 1
             bearing_counts[side] += 1
             angle_counts[turn] += 1
             target_uses[j] += 1
-    if len(selected) != TASKS_PER_SCENE:
-        raise ValueError(f'Only {len(selected)}/{TASKS_PER_SCENE} valid tasks after {len(attempted)} initial poses')
-    return selected, {'representatives': len(ids), 'distance_cuts_m': cuts.tolist(),
+    if not selected:
+        raise ValueError(f'No valid tasks after {len(attempted)} initial poses')
+    return selected, {'tasks': len(selected), 'initial_poses_attempted': len(attempted),
+                      'representatives': len(ids), 'distance_cuts_m': cuts.tolist(),
                       'distance_groups': dict(group_counts), 'bearings': dict(bearing_counts),
                       'orientations': dict(angle_counts), 'scene_up': up.tolist(),
+                      'near_duplicate_initials_skipped': initial_duplicates,
+                      'near_duplicate_target_pairs_skipped': target_duplicates,
+                      'max_route_overlap': max(pair['max_route_overlap'] for pair in selected),
                       'floor_estimate': frame['floor_estimate']}
 
 
@@ -350,6 +433,11 @@ def process_scene(name):
         task['reference_route'] = [cameras[i]['image_path'] for i in pair['route_indices']]
         task['preview'] = str(preview.relative_to(OUTPUT_JSON.parent))
         tasks.append(task)
+    # A previous run may have produced more tasks for this accepted scene.
+    current_previews = {task['preview'] for task in tasks}
+    for stale in output.glob(f'{Path(name).name}_????.jpg'):
+        if str(stale.relative_to(OUTPUT_JSON.parent)) not in current_previews:
+            stale.unlink()
     return tasks, summary
 
 
@@ -358,9 +446,11 @@ def main():
 
     if sum(DISTANCE_QUOTAS.values()) != TASKS_PER_SCENE:
         raise ValueError('DISTANCE_QUOTAS must sum to TASKS_PER_SCENE')
+    if not -90 <= MAX_TARGET_PITCH_DEGREES <= 90:
+        raise ValueError('MAX_TARGET_PITCH_DEGREES must be between -90 and 90')
     pool = eligible_scenes()
-    if len(pool) < NUM_SCENES:
-        raise ValueError(f'Only {len(pool)} reconstructed test ScanNet++ scenes are available')
+    if not pool:
+        raise ValueError('No reconstructed test scenes are available')
     order = np.random.default_rng(SEED).permutation(pool).tolist()
     OUTPUT_JSON.parent.mkdir(parents=True, exist_ok=True)
     PREVIEW_DIR.mkdir(parents=True, exist_ok=True)
@@ -372,10 +462,18 @@ def main():
                             'Interior obstacles are not collision-tested. Reference routes are not shortest paths.',
         'success_distance_m': SUCCESS_DISTANCE, 'success_view_angle_degrees': SUCCESS_VIEW_ANGLE_DEGREES,
         'frame_order': 'initial_frame_index < target_frame_index; reference routes advance in video order',
+        'target_pitch': 'Target viewing direction must be at most MAX_TARGET_PITCH_DEGREES above the estimated ground plane. '
+                        'Positive pitch looks up. This is a pose filter, not semantic ceiling detection.',
+        'endpoint_roll': 'Both initial and target views must satisfy abs(roll) <= MAX_ABS_ROLL_DEGREES '
+                         'relative to the estimated scene up; original images and camera poses are not modified.',
+        'diversity': 'Near-duplicate initial and target views are checked separately against selected endpoints. '
+                     'Target spread is the nearest previously selected target distance, normalized by candidate ground diameter. '
+                     'Route overlap is shared ground cells / smaller footprint size; a soft selection penalty. '
+                     'Per-task spread and overlap are measured at selection time; the first task has null spread.',
         'scenes': {}, 'rejected_scenes': {}, 'complete': False,
     }
     tasks = []
-    with tqdm(total=NUM_SCENES, desc='Benchmark scenes', unit='scene') as progress:
+    with tqdm(total=len(pool), desc='Benchmark scenes', unit='scene') as progress:
         for name in order:
             tqdm.write(f'Generating: {name}')
             try:
@@ -386,13 +484,12 @@ def main():
             else:
                 tasks.extend(selected)
                 report['scenes'][name] = summary
-                progress.update(1)
-                tqdm.write(f'Accepted {name}: {dict(Counter(t["distance_group"] for t in selected))}')
-            report['complete'] = len(report['scenes']) == NUM_SCENES
+                tqdm.write(f'Accepted {name}: {len(selected)}/{TASKS_PER_SCENE} tasks; '
+                           f'{dict(Counter(t["distance_group"] for t in selected))}')
+            progress.update(1)
+            report['complete'] = len(report['scenes']) + len(report['rejected_scenes']) == len(pool)
             write_json(OUTPUT_JSON, tasks)
             write_json(OUTPUT_JSON.with_suffix('.report.json'), report)
-            if report['complete']:
-                break
     index = ['# Navigation benchmark previews', '', 'Blue: projected reference route. Green: initial. Orange: target.', '']
     for task in tasks:
         relative = (OUTPUT_JSON.parent / task['preview']).relative_to(PREVIEW_DIR)
@@ -402,9 +499,8 @@ def main():
         scene_id = Path(name).name
         for stale in (PREVIEW_DIR / scene_id).glob(f'{scene_id}_????.jpg'):
             stale.unlink()
-    print(f'Scenes: {len(report["scenes"])}/{NUM_SCENES}; tasks: {len(tasks)}; JSON: {OUTPUT_JSON}', flush=True)
-    if not report['complete']:
-        raise SystemExit('Not enough valid scenes. See the report before adjusting filters.')
+    print(f'Scenes: accepted={len(report["scenes"])}, rejected={len(report["rejected_scenes"])}, '
+          f'total={len(pool)}; tasks: {len(tasks)}; JSON: {OUTPUT_JSON}', flush=True)
 
 
 if __name__ == '__main__':

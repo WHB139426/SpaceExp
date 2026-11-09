@@ -176,13 +176,15 @@ def draw_trajectory(frame, observations, output):
                                else 'Initial position outside inset region')
                     ax.text(.02, .02, message, transform=ax.transAxes, color='#c02020', zorder=10,
                             bbox={'facecolor': 'white', 'alpha': .9, 'edgecolor': 'none'})
-        ax.plot(xy[:, 0], xy[:, 1], color='white', linewidth=5, zorder=3)
-        segments = np.stack((xy[:-1], xy[1:]), axis=1)
+        # Resets teleport to the start; never draw their jumps as traveled paths.
+        connected = np.array([record.get('command') != 'reset' for record in observations[1:]], dtype=bool)
+        segments = np.stack((xy[:-1], xy[1:]), axis=1)[connected]
+        ax.add_collection(LineCollection(segments, colors='white', linewidths=5, zorder=3))
         colors = matplotlib.colors.LinearSegmentedColormap.from_list(
             'trajectory_blues', plt.get_cmap('Blues')(np.linspace(.45, .95, 256)))
         line = LineCollection(segments, cmap=colors, norm=plt.Normalize(1, max(int(steps[-1]), 2)),
                               linewidths=2.5, zorder=4, label='History')
-        line.set_array((steps[:-1] + steps[1:]) / 2)
+        line.set_array(((steps[:-1] + steps[1:]) / 2)[connected])
         ax.add_collection(line)
         ax.scatter(*xy[0], s=115, c='#20c56b', edgecolors='black',
                    linewidths=1.2, zorder=7, label='Start')

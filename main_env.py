@@ -8,7 +8,7 @@ from scene.client import CameraClient
 
 
 SCENE_CONFIG = {
-    "scene_dir": "/data4/haibo/data/3D_Env/scannetpp/307e3262f1",
+    "scene_dir": "/data4/haibo/data/3D_Env/arkitscenes/42897528",
     "blender": "/data4/haibo/software/blender/blender-4.5.13-linux-x64/blender",
     "timeout": 300,
     "resolution": 960,
@@ -23,6 +23,8 @@ SCENE_CONFIG = {
     "boundary_cell_size": 0.05,
     "boundary_close_radius": 0.15,
     "camera_radius": 0.15,
+    "min_camera_height": 0.15,  # Camera-center height above the estimated floor, in meters.
+    "max_camera_height": 2.5,
     "point_radius": 0.015,
     "move_step": 0.3,
     "look_step": 15,
@@ -30,22 +32,28 @@ SCENE_CONFIG = {
 }
 OUTPUT_DIR = str(Path(__file__).resolve().parent / "outputs")
 ACTIONS = {"move_forward", "move_backward", "move_left", "move_right",
+           "move_up", "move_down",
            "turn_left", "turn_right", "turn_up", "turn_down"}
 HELP = """Enter one command per line:
   move_forward [distance]  Walk forward horizontally, e.g. move_forward 0.3.
   move_backward [distance] Walk backward horizontally without turning.
   move_left [distance]     Strafe left relative to the current horizontal heading.
   move_right [distance]    Strafe right relative to the current horizontal heading.
+  move_up [distance]       Rise along scene up without changing camera orientation.
+  move_down [distance]     Descend opposite scene up without changing camera orientation.
   turn_left [degrees]      Turn left, e.g. turn_left 30.
   turn_right [degrees]     Turn right.
   turn_up [degrees]        Look up without changing the walking direction.
   turn_down [degrees]      Look down without changing the walking direction.
   observe                 Save another observation without moving.
+  reset                   Return to the initial pose while keeping this session and its history.
   /new                    Start a new output directory at the initial camera pose.
   help                    Show these commands.
   /exit                   Quit (also: exit, quit).
 Omit the magnitude to use move_step or look_step from SCENE_CONFIG.
 All translation paths must stay within the inset scene boundary when boundary_enforced is enabled.
+Camera-center height must also stay within min_camera_height and max_camera_height above the estimated floor.
+Distances are in meters; turn angles are in degrees. Height limits do not detect local ceilings or furniture.
 Blocked moves keep the camera in place; turns remain available.
 Each observation saves a first-person PNG, camera metadata, and a trajectory chart."""
 
@@ -85,6 +93,8 @@ def run_environment(camera):
                 show_observation(camera.observe())
             elif command == "observe":
                 show_observation(camera.observe())
+            elif command == "reset":
+                show_observation(camera.reset())
             else:
                 parts = command.split()
                 if parts[0] not in ACTIONS or len(parts) > 2:

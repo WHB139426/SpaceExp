@@ -57,15 +57,26 @@ MODEL_SERVER_CONFIG = {
     },
 }
 AGENT_CONFIG = {
-    "max_steps": 100,
+    "max_steps": 50,
     "max_conversation_images": 7,
     "verbose": True,  # Print tool calls, OpenAI reasoning summaries and usage.
 }
 TOOL_CONFIG = {
+    'enable_observe': True,
+    'enable_action': True,
+    'enable_reset': True,
+    'enable_move_forward': True,
     'enable_move_backward': True,
     'enable_move_left': True,
     'enable_move_right': True,
+    'enable_move_up': True,
+    'enable_move_down': True,
+    'enable_turn_left': True,
+    'enable_turn_right': True,
+    'enable_turn_up': True,
+    'enable_turn_down': True,
     'enable_top_down': False,
+    'enable_finish_task': False,
 }
 SCENE_CONFIG = {
     "scene_dir": "/data4/haibo/data/3D_Env/scannetpp/307e3262f1",
@@ -83,6 +94,8 @@ SCENE_CONFIG = {
     "boundary_cell_size": 0.05,
     "boundary_close_radius": 0.15,
     "camera_radius": 0.15,
+    "min_camera_height": 0.15,  # Camera-center height above the estimated floor, in meters.
+    "max_camera_height": 2.5,
     "point_radius": 0.015,
     "move_step": 0.3,
     "look_step": 15,

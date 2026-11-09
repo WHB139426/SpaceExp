@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import bpy
 from mathutils import Matrix, Quaternion, Vector
 
-from .boundary import movement_block_reason
+from .boundary import height_block_reason, movement_block_reason
 from .trajectory import TrajectoryMap
 
 
@@ -267,6 +267,12 @@ def create_crosshair(camera, scene):
 class SceneRenderer:
     def __init__(self, config, output):
         self.config = config
+        self.min_camera_height = config.get('min_camera_height', 0.15)
+        self.max_camera_height = config.get('max_camera_height', 2.5)
+        if (not all(type(value) in (int, float) and math.isfinite(value)
+                    for value in (self.min_camera_height, self.max_camera_height))
+                or not 0 <= self.min_camera_height < self.max_camera_height):
+            raise ValueError('Camera height limits must be finite and satisfy 0 <= min_camera_height < max_camera_height')
         directory = Path(config['scene_dir'])
         cameras = json.loads((directory / 'cameras.json').read_text())
         cameras.sort(key=lambda frame: frame.get('video_frame_index', frame.get('id', 0)))
@@ -282,6 +288,7 @@ class SceneRenderer:
         estimated, description, floor, sample, cloud = estimate_scene_up(
             meshes, cameras, self.extent, config['up'])
         self.floor_description = description
+        self.floor = Vector(floor)
         self.up = Vector(config['up'] if config['up'] is not None else estimated).normalized()
         if self.up.length < 1e-8 or not all(math.isfinite(value) for value in self.up):
             raise ValueError('Scene up must be a finite, nonzero vector')
@@ -342,6 +349,7 @@ class SceneRenderer:
                 'magnitude': magnitude, 'applied_magnitude': applied_magnitude,
                 'blocked': blocked, 'reason': reason,
                 'position': list(self.camera.location),
+                'height_above_floor': (self.camera.location - self.floor).dot(self.up),
                 'forward': list(self.camera.rotation_quaternion @ Vector((0, 0, -1))),
                 'heading': list(self.heading),
                 'up': list(self.camera.rotation_quaternion @ Vector((0, 1, 0))),
@@ -351,6 +359,9 @@ class SceneRenderer:
             frame = self.trajectory_map.render(self.output, observations)
             metadata.write_text(json.dumps({
                 **observation, 'intrinsics': self.intrinsics, 'top_down_frame': frame,
+                'height_limits': {'min': self.min_camera_height, 'max': self.max_camera_height,
+                                  'floor': list(self.floor), 'up': list(self.up),
+                                  'enforced': bool(self.config.get('boundary_enforced', True))},
             }, indent=2) + '\n')
             temporary_trajectory.write_text(json.dumps(observations, indent=2) + '\n')
             temporary_trajectory.replace(trajectory_path)
@@ -363,10 +374,23 @@ class SceneRenderer:
         self.observations = observations
         return record
 
+    def reset(self):
+        position = self.camera.location.copy()
+        rotation = self.camera.rotation_quaternion.copy()
+        heading = self.heading.copy()
+        self._apply_pose(self.initial_position, self.initial_rotation)
+        self.heading = self.initial_heading.copy()
+        try:
+            return self.observe('reset')
+        except BaseException:
+            self._apply_pose(position, rotation)
+            self.heading = heading
+            raise
+
     def action(self, key, magnitude=None):
-        moves = {'move_forward', 'move_backward', 'move_left', 'move_right'}
+        moves = {'move_forward', 'move_backward', 'move_left', 'move_right', 'move_up', 'move_down'}
         if key not in moves | {'turn_left', 'turn_right', 'turn_up', 'turn_down'}:
-            raise ValueError('Allowed actions: move_forward, move_backward, move_left, move_right, '
+            raise ValueError('Allowed actions: move_forward, move_backward, move_left, move_right, move_up, move_down, '
                              'turn_left, turn_right, turn_up, turn_down')
         if magnitude is None:
             magnitude = self.config['move_step' if key in moves else 'look_step']
@@ -382,9 +406,18 @@ class SceneRenderer:
         if key in moves:
             right = heading.cross(self.up).normalized()
             direction = {'move_forward': heading, 'move_backward': -heading,
-                         'move_left': -right, 'move_right': right}[key]
+                         'move_left': -right, 'move_right': right,
+                         'move_up': self.up, 'move_down': -self.up}[key]
             if self.config.get('boundary_enforced', True):
-                reason = movement_block_reason(self.trajectory_map.boundary, position, direction, magnitude)
+                reason = height_block_reason(
+                    position, direction, magnitude, floor=self.floor, up=self.up,
+                    min_height=self.min_camera_height, max_height=self.max_camera_height)
+                if reason is None:
+                    # Vertical motion has a fixed footprint; avoid float32 projection drift.
+                    vertical = key in {'move_up', 'move_down'}
+                    reason = movement_block_reason(self.trajectory_map.boundary, position,
+                                                   heading if vertical else direction,
+                                                   0 if vertical else magnitude)
             if reason is None:
                 next_position += direction * magnitude
             else:

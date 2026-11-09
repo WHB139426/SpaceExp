@@ -71,6 +71,7 @@ class Agent:
         self.reset()
 
     def reset(self) -> None:
+        self.result: dict[str, object] | None = None
         self.messages: list[Message] = []
         if self.system_prompt:
             self.messages.append({"role": "system", "content": self.system_prompt})
@@ -85,6 +86,18 @@ class Agent:
         temporary.replace(self.conversation_path)
 
     def run(self, prompt: str | list[dict[str, object]]) -> str:
+        self.result = None
+        try:
+            return self._run(prompt)
+        except (Exception, KeyboardInterrupt) as exc:
+            if self.result is None:
+                self.result = {
+                    'status': None, 'reason': f'{type(exc).__name__}: {exc}',
+                    'termination': 'interrupted' if isinstance(exc, KeyboardInterrupt) else 'error',
+                }
+            raise
+
+    def _run(self, prompt: str | list[dict[str, object]]) -> str:
         self.messages.append({"role": "user", "content": prompt})
         schemas = [tool.schema() for tool in self.tools.values()]
         for _ in range(self.max_steps):
@@ -106,24 +119,40 @@ class Agent:
             if not calls:
                 if assistant.get('continue_generation'):
                     continue
-                return str(assistant.get("content", ""))
+                answer = str(assistant.get("content", ""))
+                self.result = {'status': None, 'reason': answer, 'termination': 'model_response'}
+                return answer
 
             results = []
             attachments = []
+            terminal = None
             for call in calls:
-                result, extra_messages = self._execute_tool(call)
+                if terminal is not None:
+                    # Keep every call ID paired with a result, without running more actions.
+                    results.append({
+                        'role': 'tool', 'tool_call_id': call['id'], 'name': call['function']['name'],
+                        'content': json.dumps({'ok': False, 'error': 'Task already finished; tool call was not executed.'}),
+                    })
+                    continue
+                result, extra_messages, terminal = self._execute_tool(call)
                 results.append(result)
                 attachments.extend(extra_messages)
             # Complete every tool call before adding visual observation messages.
             self.messages.extend(results)
             self.messages.extend(attachments)
             self._save()
-        raise RuntimeError(f"agent exceeded max_steps={self.max_steps}")
+            if terminal is not None:
+                self.result = terminal
+                return json.dumps(terminal, ensure_ascii=False)
+        self.result = {'status': 'failure', 'reason': f'Task was not completed within max_steps={self.max_steps}.',
+                       'termination': 'max_steps'}
+        return json.dumps(self.result, ensure_ascii=False)
 
-    def _execute_tool(self, call: Message) -> tuple[Message, tuple[Message, ...]]:
+    def _execute_tool(self, call: Message) -> tuple[Message, tuple[Message, ...], dict[str, object] | None]:
         function = call["function"]
         name = function["name"]
         attachments = ()
+        terminal = None
         try:
             if name not in self.tools:
                 raise ValueError(f"unknown tool: {name}")
@@ -132,6 +161,8 @@ class Agent:
                 attachments = value.messages
                 value = value.value
             payload = {"ok": True, "result": value}
+            if self.tools[name].terminal:
+                terminal = {**value, 'termination': name}
         except Exception as exc:
             payload = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
         return {
@@ -139,4 +170,4 @@ class Agent:
             "tool_call_id": call["id"],
             "name": name,
             "content": json.dumps(payload, ensure_ascii=False),
-        }, attachments
+        }, attachments, terminal

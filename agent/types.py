@@ -34,6 +34,7 @@ class Tool:
     description: str
     parameters: dict[str, object]
     function: Callable[..., object]
+    terminal: bool = False
 
     def schema(self) -> dict[str, object]:
         return {

@@ -1,4 +1,4 @@
-"""Build the ground-plane scene footprint and check camera movement segments."""
+"""Build the ground-plane scene footprint and check horizontal and height limits."""
 
 from collections import deque
 import math
@@ -110,6 +110,21 @@ def build_boundary(points, *, origin, right, ahead, up, floor, max_height,
         'start_inside': start_inside, 'start_allowed': bool(allowed[start_cell]),
         'seed_distance': seed_distance,
     }
+
+
+def height_block_reason(position, direction, magnitude, *, floor, up, min_height, max_height):
+    """Check a straight movement against camera-center heights above the estimated floor."""
+    height = float((np.asarray(position, dtype=float) - floor) @ up)
+    tolerance = 1e-6  # Allow for Blender's float32 camera coordinates.
+    if not math.isfinite(height) or not min_height - tolerance <= height <= max_height + tolerance:
+        return f'The current camera height is outside the allowed range [{min_height:g}, {max_height:g}] meters above the estimated floor.'
+    vertical = float(np.asarray(direction, dtype=float) @ up)
+    # Compare distances before multiplying, so enormous requests cannot overflow coordinates.
+    if vertical > 0 and magnitude > (max_height - height + tolerance) / vertical:
+        return f'The movement path would exceed the maximum camera height of {max_height:g} meters above the estimated floor.'
+    if vertical < 0 and magnitude > (height - min_height + tolerance) / -vertical:
+        return f'The movement path would go below the minimum camera height of {min_height:g} meters above the estimated floor.'
+    return None
 
 
 def movement_block_reason(boundary, position, heading, magnitude):
