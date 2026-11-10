@@ -11,7 +11,45 @@ from scene.client import CameraClient
 
 MODEL = "qwen3.8-27b"
 MODEL_GENERATION_CONFIGS = {
+    "glm-5.3-flash": {
+        "server_config": {
+            "base_url": "http://127.0.0.1:8002/v1",
+            "timeout": 300,
+        },
+        "max_tokens": 16 * 1024,
+        "temperature": 1.0,
+        "top_p": 0.95,
+        "top_k": 0,
+        "reasoning_effort": "max",  # "low", "high", "max"
+        "preserve_thinking": True,
+    },
+    "deepseek-v4.1-flash": {
+        "server_config": {
+            "base_url": "http://127.0.0.1:8003/v1",
+            "timeout": 300,
+        },
+        "max_tokens": 16 * 1024,
+        "temperature": 1.0,
+        "top_p": 0.95,
+        "top_k": 0,
+        "reasoning_effort": 75,  # low=25, high=50, xhigh=75, max=100; accepts 1..100.
+    },
+    "qwen3.5-9b": {
+        "server_config": {
+            "base_url": 'http://127.0.0.1:8001/v1',
+            "timeout": 180,
+        },
+        "max_tokens": 16 * 1024,
+        "temperature": 1.0,
+        "top_p": 0.95,
+        "top_k": 20,
+        "enable_thinking": True,
+    },
     "qwen3.8-27b": {
+        "server_config": {
+            "base_url": 'http://127.0.0.1:8000/v1',
+            "timeout": 180,
+        },
         "max_tokens": 16 * 1024,
         "temperature": 1.0,
         "top_p": 0.95,
@@ -21,6 +59,10 @@ MODEL_GENERATION_CONFIGS = {
         "preserve_thinking": True,
     },
     "qwen3.8-flash-next": {
+        "server_config": {
+            "base_url": 'http://127.0.0.1:8000/v1',
+            "timeout": 180,
+        },
         "max_tokens": 16 * 1024,
         "temperature": 1.0,
         "top_p": 0.95,
@@ -30,30 +72,31 @@ MODEL_GENERATION_CONFIGS = {
         "preserve_thinking": True,
     },
     "gpt-6-astra": {
+        "server_config": {
+            "base_url": 'https://api.openai.com/v1',
+            "timeout": 300,
+        },
         "max_output_tokens": 32 * 1024,
         "reasoning_effort": "high", # "low", "medium", "high", "xhigh", "max"
         "reasoning_summary": "auto",
     },
     "gpt-6.1-sol": {
+        "server_config": {
+            "base_url": 'https://api.openai.com/v1',
+            "timeout": 300,
+        },
         "max_output_tokens": 16 * 1024,
         "reasoning_effort": "medium",  # "low", "medium", "high", "xhigh", "max"
         "reasoning_summary": "auto",
     },
     "gpt-6.1-terra": {
+        "server_config": {
+            "base_url": 'https://api.openai.com/v1',
+            "timeout": 300,
+        },
         "max_output_tokens": 16 * 1024,
         "reasoning_effort": "medium", # "low", "medium", "high", "xhigh", "max"
         "reasoning_summary": "auto",
-    },
-}
-MODEL_SERVER_CONFIG = {
-    "vllm": {
-        "base_url": "http://127.0.0.1:8000/v1",
-        "timeout": 180,
-    },
-    "openai": {
-        "base_url": "https://api.openai.com/v1",
-        "timeout": 300,
-        # api_key is read from OPENAI_API_KEY by the SDK.
     },
 }
 AGENT_CONFIG = {
@@ -152,7 +195,7 @@ def run_conversation(backend, protocol, camera, conversation_path):
 
 def main():
     model_config = MODEL_GENERATION_CONFIGS[MODEL]
-    backend, protocol = create_model(MODEL, model_config, MODEL_SERVER_CONFIG)
+    backend, protocol = create_model(MODEL, model_config)
     try:
         config = {
             **SCENE_CONFIG,

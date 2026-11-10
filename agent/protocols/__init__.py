@@ -1,12 +1,18 @@
 """Model-specific message preparation and output parsing."""
 
 from ..types import ChatProtocol
+from .deepseek import DeepSeekProtocol
+from .glm import GLMProtocol
 from .openai import OpenAIProtocol
 from .qwen import QwenProtocol
 
 
-PROTOCOLS = {"qwen": QwenProtocol, "openai": OpenAIProtocol}
+PROTOCOLS = {"qwen": QwenProtocol, "glm": GLMProtocol,
+             "deepseek": DeepSeekProtocol, "openai": OpenAIProtocol}
 MODEL_ADAPTERS = {
+    "glm-5.3-flash": {"backend": "vllm", "protocol": "glm"},
+    "deepseek-v4.1-flash": {"backend": "vllm", "protocol": "deepseek"},
+    "qwen3.5-9b": {"backend": "vllm", "protocol": "qwen"},
     "qwen3.8-27b": {"backend": "vllm", "protocol": "qwen"},
     "qwen3.8-flash-next": {"backend": "vllm", "protocol": "qwen"},
     "gpt-6-astra": {"backend": "openai", "protocol": "openai"},

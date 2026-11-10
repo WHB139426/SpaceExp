@@ -188,6 +188,10 @@ def draw_trajectory(frame, observations, output):
         ax.add_collection(line)
         ax.scatter(*xy[0], s=115, c='#20c56b', edgecolors='black',
                    linewidths=1.2, zorder=7, label='Start')
+        if usable[0]:
+            heading = directions[0] / lengths[0] * frame['arrow_length']
+            ax.quiver(*xy[0], *heading, angles='xy', scale_units='xy', scale=1,
+                      color='#20c56b', edgecolors='white', linewidths=.5, width=.007, zorder=8)
         target = frame.get('target')
         if target is not None:
             target_xy = (np.asarray(target['position']) - frame['origin']) @ basis

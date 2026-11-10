@@ -9,15 +9,53 @@ import random
 import numpy as np
 
 from agent import Agent
-from agent.models import create_model
+from agent.models import create_model, model_config_snapshot
 from agent.tools import create_tools
 from scene.client import CameraClient, reference_camera_state
 
 
-MODEL = "qwen3.8-27b"
+MODEL = "qwen3.8-flash-next"
 
 MODEL_GENERATION_CONFIGS = {
+    "glm-5.3-flash": {
+        "server_config": {
+            "base_url": "http://127.0.0.1:8002/v1",
+            "timeout": 300,
+        },
+        "max_tokens": 16 * 1024,
+        "temperature": 1.0,
+        "top_p": 0.95,
+        "top_k": 0,
+        "reasoning_effort": "max",  # "low", "high", "max"
+        "preserve_thinking": True,
+    },
+    "deepseek-v4.1-flash": {
+        "server_config": {
+            "base_url": "http://127.0.0.1:8003/v1",
+            "timeout": 300,
+        },
+        "max_tokens": 16 * 1024,
+        "temperature": 1.0,
+        "top_p": 0.95,
+        "top_k": 0,
+        "reasoning_effort": 75,  # low=25, high=50, xhigh=75, max=100; accepts 1..100.
+    },
+    "qwen3.5-9b": {
+        "server_config": {
+            "base_url": 'http://127.0.0.1:8001/v1',
+            "timeout": 180,
+        },
+        "max_tokens": 16 * 1024,
+        "temperature": 1.0,
+        "top_p": 0.95,
+        "top_k": 20,
+        "enable_thinking": True,
+    },
     "qwen3.8-27b": {
+        "server_config": {
+            "base_url": 'http://127.0.0.1:8000/v1',
+            "timeout": 180,
+        },
         "max_tokens": 16 * 1024,
         "temperature": 1.0,
         "top_p": 0.95,
@@ -27,6 +65,10 @@ MODEL_GENERATION_CONFIGS = {
         "preserve_thinking": True,
     },
     "qwen3.8-flash-next": {
+        "server_config": {
+            "base_url": 'http://127.0.0.1:8000/v1',
+            "timeout": 180,
+        },
         "max_tokens": 16 * 1024,
         "temperature": 1.0,
         "top_p": 0.95,
@@ -36,33 +78,34 @@ MODEL_GENERATION_CONFIGS = {
         "preserve_thinking": True,
     },
     "gpt-6-astra": {
+        "server_config": {
+            "base_url": 'https://api.openai.com/v1',
+            "timeout": 300,
+        },
         "max_output_tokens": 32 * 1024,
-        "reasoning_effort": "high", # "low", "medium", "high", "xhigh", "max"
+        "reasoning_effort": "medium", # "low", "medium", "high", "xhigh", "max"
         "reasoning_summary": "auto",
     },
     "gpt-6.1-sol": {
+        "server_config": {
+            "base_url": 'https://api.openai.com/v1',
+            "timeout": 300,
+        },
         "max_output_tokens": 16 * 1024,
         "reasoning_effort": "medium",  # "low", "medium", "high", "xhigh", "max"
         "reasoning_summary": "auto",
     },
     "gpt-6.1-terra": {
+        "server_config": {
+            "base_url": 'https://api.openai.com/v1',
+            "timeout": 300,
+        },
         "max_output_tokens": 16 * 1024,
         "reasoning_effort": "medium", # "low", "medium", "high", "xhigh", "max"
         "reasoning_summary": "auto",
     },
 }
 
-MODEL_SERVER_CONFIG = {
-    "vllm": {
-        "base_url": "http://127.0.0.1:8000/v1",
-        "timeout": 180,
-    },
-    "openai": {
-        "base_url": "https://api.openai.com/v1",
-        "timeout": 300,
-        # api_key is read from OPENAI_API_KEY by the SDK.
-    },
-}
 
 OUTPUT_DIR = str(Path(__file__).resolve().parent / "outputs")
 
@@ -88,7 +131,7 @@ def load_json(path):
 
 test_data = load_json(BENCHMARK_JSON)
 
-init_seeds(54)
+init_seeds(42)
 sample = random.choice(test_data)
 print(sample)
 
@@ -211,7 +254,7 @@ def main():
         'scene_dir': str(scene_dir), 'initial_view': str(initial_copy), 'goal_view': str(goal_copy),
         'prompt': PROMPT, 'initial_camera': initial_camera, 'goal_camera': goal_camera,
         'tool_config': TOOL_CONFIG,
-        'model': MODEL, 'model_config': MODEL_GENERATION_CONFIGS[MODEL],
+        'model': MODEL, 'model_config': model_config_snapshot(MODEL_GENERATION_CONFIGS[MODEL]),
         'agent_config': AGENT_CONFIG,
     }, indent=2) + '\n')
 
@@ -222,7 +265,7 @@ def main():
     target_camera = None
     try:
         target_camera = reference_camera_state(goal_camera, goal_copy)
-        backend, protocol = create_model(MODEL, model_config, MODEL_SERVER_CONFIG)
+        backend, protocol = create_model(MODEL, model_config)
         with CameraClient(config['blender'], config, output, timeout=config['timeout']) as camera:
             camera.observe()  # Record the actual starting pose and its local trajectory map.
             agent = Agent(

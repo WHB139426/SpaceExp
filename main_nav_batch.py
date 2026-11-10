@@ -10,7 +10,8 @@ import time
 from tqdm import tqdm
 
 from agent import Agent
-from agent.models import create_model
+from agent.models import create_model, model_config_snapshot
+from agent.protocols import MODEL_ADAPTERS
 from agent.tools import create_tools
 from scene.client import CameraClient, reference_camera_state
 
@@ -20,10 +21,48 @@ BENCHMARK_JSON = Path(__file__).resolve().parent / 'outputs' / 'sub_benchmark_te
 OUTPUT_DIR = Path(__file__).resolve().parent / 'outputs'
 RESUME_DIR = None  # Set to a previous nav_batch_* directory to continue it.
 
-MODEL = "gpt-6.1-terra"
+MODEL = "qwen3.8-flash-next"
 
 MODEL_GENERATION_CONFIGS = {
+    "glm-5.3-flash": {
+        "server_config": {
+            "base_url": "http://127.0.0.1:8002/v1",
+            "timeout": 300,
+        },
+        "max_tokens": 16 * 1024,
+        "temperature": 1.0,
+        "top_p": 0.95,
+        "top_k": 0,
+        "reasoning_effort": "max",  # "low", "high", "max"
+        "preserve_thinking": True,
+    },
+    "deepseek-v4.1-flash": {
+        "server_config": {
+            "base_url": "http://127.0.0.1:8003/v1",
+            "timeout": 300,
+        },
+        "max_tokens": 16 * 1024,
+        "temperature": 1.0,
+        "top_p": 0.95,
+        "top_k": 0,
+        "reasoning_effort": 75,  # low=25, high=50, xhigh=75, max=100; accepts 1..100.
+    },
+    "qwen3.5-9b": {
+        "server_config": {
+            "base_url": 'http://127.0.0.1:8001/v1',
+            "timeout": 180,
+        },
+        "max_tokens": 16 * 1024,
+        "temperature": 1.0,
+        "top_p": 0.95,
+        "top_k": 20,
+        "enable_thinking": True,
+    },
     "qwen3.8-27b": {
+        "server_config": {
+            "base_url": 'http://127.0.0.1:8000/v1',
+            "timeout": 180,
+        },
         "max_tokens": 16 * 1024,
         "temperature": 1.0,
         "top_p": 0.95,
@@ -33,6 +72,10 @@ MODEL_GENERATION_CONFIGS = {
         "preserve_thinking": True,
     },
     "qwen3.8-flash-next": {
+        "server_config": {
+            "base_url": 'http://127.0.0.1:8000/v1',
+            "timeout": 180,
+        },
         "max_tokens": 16 * 1024,
         "temperature": 1.0,
         "top_p": 0.95,
@@ -42,33 +85,34 @@ MODEL_GENERATION_CONFIGS = {
         "preserve_thinking": True,
     },
     "gpt-6-astra": {
+        "server_config": {
+            "base_url": 'https://api.openai.com/v1',
+            "timeout": 300,
+        },
         "max_output_tokens": 32 * 1024,
         "reasoning_effort": "high", # "low", "medium", "high", "xhigh", "max"
         "reasoning_summary": "auto",
     },
     "gpt-6.1-sol": {
+        "server_config": {
+            "base_url": 'https://api.openai.com/v1',
+            "timeout": 300,
+        },
         "max_output_tokens": 16 * 1024,
         "reasoning_effort": "medium",  # "low", "medium", "high", "xhigh", "max"
         "reasoning_summary": "auto",
     },
     "gpt-6.1-terra": {
+        "server_config": {
+            "base_url": 'https://api.openai.com/v1',
+            "timeout": 300,
+        },
         "max_output_tokens": 16 * 1024,
         "reasoning_effort": "medium", # "low", "medium", "high", "xhigh", "max"
         "reasoning_summary": "auto",
     },
 }
 
-MODEL_SERVER_CONFIG = {
-    "vllm": {
-        "base_url": "http://127.0.0.1:8000/v1",
-        "timeout": 180,
-    },
-    "openai": {
-        "base_url": "https://api.openai.com/v1",
-        "timeout": 300,
-        # api_key is read from OPENAI_API_KEY by the SDK.
-    },
-}
 
 AGENT_CONFIG = {
     "max_steps": 50,
@@ -205,7 +249,7 @@ def run_task(task, output, backend, protocol):
         scene_dir = (Path(DATA_ROOT).expanduser() / task['scene']).resolve()
         task_data = {
             'benchmark_task': task, 'scene_dir': str(scene_dir), 'prompt': PROMPT,
-            'model': MODEL, 'model_config': MODEL_GENERATION_CONFIGS[MODEL],
+            'model': MODEL, 'model_config': model_config_snapshot(MODEL_GENERATION_CONFIGS[MODEL]),
             'agent_config': AGENT_CONFIG, 'tool_config': TOOL_CONFIG,
         }
         write_json(output / 'task.json', task_data)
@@ -281,9 +325,7 @@ def checkpoint(output, tasks, records):
 def main():
     tasks = load_benchmark()
     settings = {
-        'model': MODEL, 'model_config': MODEL_GENERATION_CONFIGS[MODEL],
-        'server_config': {name: {key: value for key, value in config.items() if key != 'api_key'}
-                          for name, config in MODEL_SERVER_CONFIG.items()},
+        'model': MODEL, 'model_config': model_config_snapshot(MODEL_GENERATION_CONFIGS[MODEL]),
         'data_root': str(Path(DATA_ROOT).expanduser().resolve()),
         'scene_config': SCENE_CONFIG, 'agent_config': AGENT_CONFIG, 'tool_config': TOOL_CONFIG,
         'system_prompt': SYSTEM_PROMPT, 'prompt': PROMPT,
@@ -297,7 +339,12 @@ def main():
         write_json(output / 'benchmark.json', tasks)
     else:
         output = Path(RESUME_DIR).expanduser().resolve()
-        if json.loads((output / 'run.json').read_text())['settings'] != settings:
+        saved_settings = json.loads((output / 'run.json').read_text())['settings']
+        if 'server_config' in saved_settings:  # Accept snapshots from before per-model server settings.
+            backend_name = MODEL_ADAPTERS[saved_settings['model']]['backend']
+            saved_settings['model_config'] = {**saved_settings['model_config'],
+                                             'server_config': saved_settings.pop('server_config')[backend_name]}
+        if saved_settings != settings:
             raise ValueError('Resume settings differ from run.json; restore the original configuration')
         if json.loads((output / 'benchmark.json').read_text()) != tasks:
             raise ValueError('Benchmark differs from the saved benchmark.json')
@@ -321,7 +368,7 @@ def main():
 
     backend = None
     try:
-        backend, protocol = create_model(MODEL, MODEL_GENERATION_CONFIGS[MODEL], MODEL_SERVER_CONFIG)
+        backend, protocol = create_model(MODEL, MODEL_GENERATION_CONFIGS[MODEL])
         with tqdm(total=len(tasks), initial=summary['finished'], desc='Navigation tasks', unit='task') as progress:
             for task in tasks:
                 previous = records.get(task_key(task))

@@ -4,7 +4,7 @@
 
 ## 运行
 
-在对应入口 `main_agent.py` 或 `main_nav.py` 顶部选择 `MODEL`，并通过 `MODEL_GENERATION_CONFIGS[MODEL]` 设置该模型的生成与 thinking 参数。`MODEL_SERVER_CONFIG` 按 `vllm` / `openai` 分别配置服务地址和超时，`AGENT_CONFIG` 配置工具循环上限、历史图片预算和 `verbose` 输出，`SCENE_CONFIG` 集中配置场景目录、Blender 路径、渲染参数和步长。`agent/protocols/__init__.py` 的 `MODEL_ADAPTERS` 字典显式指定每个模型的 backend 和 protocol，两个 agent 入口共用 `agent.models.create_model` 工厂。
+在对应入口 `main_agent.py`、`main_nav.py` 或 `main_nav_batch.py` 顶部选择 `MODEL`，并通过 `MODEL_GENERATION_CONFIGS[MODEL]` 设置该模型的生成与 thinking 参数。每个模型内部的 `server_config` 配置自己的 `base_url` 和 `timeout`，`AGENT_CONFIG` 配置工具循环上限、历史图片预算和 `verbose` 输出，`SCENE_CONFIG` 集中配置场景目录、Blender 路径、渲染参数和步长。`agent/protocols/__init__.py` 的 `MODEL_ADAPTERS` 字典显式指定每个模型的 backend 和 protocol，三个 agent 入口共用 `agent.models.create_model` 工厂。
 
 GPT-6 使用 `MODEL = "gpt-6-astra"`，然后设置环境变量并启动：
 
@@ -14,7 +14,19 @@ python main_agent.py
 # Or: python main_nav.py
 ```
 
-GPT 使用官方 Responses API；Qwen 继续使用本地 vLLM Chat Completions 和 Qwen 文本工具协议。GPT 默认 `reasoning_effort="high"`、`reasoning_summary="auto"`，不传 Qwen 的采样和模板参数。所有模型共用相机工具、动作开关、场景渲染和 agent loop。GPT 每轮自动选择工具或结束回答，最多调用一个工具；不会强制连续移动。`verbose=True` 打印每轮工具调用、GPT 推理摘要（若有）和 token usage；摘要不是原始 CoT。
+GPT 使用官方 Responses API；Qwen、GLM 和 DeepSeek 使用本地 vLLM Chat Completions，各自的协议解析原生工具调用文本。GPT 默认 `reasoning_effort="high"`、`reasoning_summary="auto"`，不传 Qwen 的采样和模板参数。所有模型共用相机工具、动作开关、场景渲染和 agent loop。GPT 每轮自动选择工具或结束回答，最多调用一个工具；不会强制连续移动。`verbose=True` 打印每轮工具调用、GPT 推理摘要（若有）和 token usage；摘要不是原始 CoT。
+
+GLM 和 DeepSeek 的推理配置及工具协议参考 `../AgentHarness/protocols/`，仅迁入模型协议，共用现有相机工具、图像历史管理和 agent loop。
+在三个入口中选择对应 `MODEL` 即可，服务配置位于该模型自己的 `server_config`。
+
+| Model | Protocol | Default Endpoint | Reasoning Effort |
+|---|---|---|---|
+| `glm-5.3-flash` | GLM tool-call tags | `http://127.0.0.1:8002/v1` | `low`, `high`, `max` |
+| `deepseek-v4.1-flash` | DeepSeek DSML | `http://127.0.0.1:8003/v1` | Integer from 1 to 100; default 75 |
+
+两个新模型的 `max_tokens` 先统一设为 `16 * 1024`，可在各入口单独调整。
+GLM 默认 `preserve_thinking=True`，协议传递 `clear_thinking=False`；DeepSeek 按原仓库使用
+`thinking_mode="thinking"`，输出应包含结束推理的 `</think>`。它们的 `reasoning_effort` 含义与 Qwen/GPT 不同，分别配置。
 
 GPT 使用 `store=False`，每轮由本地重传历史，不使用 `previous_response_id` 或服务器会话。每个 assistant 消息的 `response_items` 保存完整原生输出，包括原始工具调用、消息 phase 和不可读的加密推理状态；下一轮原样回传，`reasoning_summary` 仅供阅读。`usage` 和 `response_id` 也记录在 `conversation.json`。图片历史仍采用现有预算；导航保留 initial/target，较旧观察图片替换为文字，发送请求时才嵌入仍保留的图片。`/new` 清空这些历史和推理状态，旧会话文件保持不变。图片被移除后，已有文字和推理状态仍可能保留对旧图片的理解。
 
@@ -22,7 +34,7 @@ GPT 使用 `store=False`，每轮由本地重传历史，不使用 `previous_res
 
 非交互式图像目标导航使用 `python main_nav.py`。在文件顶部配置 `INITIAL_VIEW`、`GOAL_VIEW` 和英文 `PROMPT`；两张图片必须来自场景的 `frames/` 且能在 `cameras.json` 中匹配。环境从 initial view 的完整相机位姿启动，模型接收两张参考图及任务文本。`MODEL`、模型生成参数、服务地址、输出目录、系统提示词以及 agent、场景和工具配置均在 `main_nav.py` 内独立定义，不从 `main_agent.py` 导入。两个入口的配置分别维护。
 
-批量导航运行 `python main_nav_bacth.py`（文件名沿用 `bacth`）。该入口在文件顶部独立维护模型、agent、工具、场景、提示词、`DATA_ROOT`、`BENCHMARK_JSON`、`OUTPUT_DIR` 和 `RESUME_DIR` 配置，不导入其他 main 文件。默认按 JSON 顺序运行全部任务，tqdm 显示整体进度。整个批次复用模型客户端；每条任务新建 Agent 和 Blender 环境，使用该条 initial/target 的相机参数，聊天、相机状态和轨迹相互独立。单条运行异常会记录为 `termination="error"` 并继续下一条；步数耗尽记为失败，`finish_task` 保留模型自报结果。配置或模型客户端初始化错误会直接报错。
+批量导航运行 `python main_nav_batch.py`。该入口在文件顶部独立维护模型、agent、工具、场景、提示词、`DATA_ROOT`、`BENCHMARK_JSON`、`OUTPUT_DIR` 和 `RESUME_DIR` 配置，不导入其他 main 文件。默认按 JSON 顺序运行全部任务，tqdm 显示整体进度。整个批次复用模型客户端；每条任务新建 Agent 和 Blender 环境，使用该条 initial/target 的相机参数，聊天、相机状态和轨迹相互独立。单条运行异常会记录为 `termination="error"` 并继续下一条；步数耗尽记为失败，`finish_task` 保留模型自报结果。配置或模型客户端初始化错误会直接报错。
 
 批量输出结构如下，每条任务的输出内容与单任务入口一致：
 
@@ -118,12 +130,44 @@ Agent 每次启动在 `outputs/chat_<场景名>_<模型名>_<时间戳>/` 保存
 
 ## vLLM 启动命令
 
+## Qwen3.5-9B
+
+使用本地权重和原生 262,144-token 上下文，不修改 RoPE。需要 vLLM >= 0.17.0；
+在安装了 vLLM 的推理环境中运行。GPU 编号和显存参数按实际资源调整，先使用单并发。
+参考 [vLLM 官方 recipe](https://recipes.vllm.ai/Qwen/Qwen3.5-9B)。
+
+```bash
+CUDA_VISIBLE_DEVICES=0 \
+VLLM_ENGINE_READY_TIMEOUT_S=3600 \
+vllm serve /data4/haibo/weights/Qwen3.5-9B \
+  --served-model-name qwen3.5-9b \
+  --host 127.0.0.1 \
+  --port 8001 \
+  --tensor-parallel-size 1 \
+  --max-model-len 262144 \
+  --max-num-seqs 1 \
+  --gpu-memory-utilization 0.50 \
+  --reasoning-parser qwen3 \
+  --enable-prefix-caching \
+  --limit-mm-per-prompt '{"image":100,"video":0}'
+```
+
+启动后，在 `main_agent.py`、`main_nav.py` 或 `main_nav_batch.py` 中将
+`MODEL = "qwen3.5-9b"`，并确认对应 `MODEL_GENERATION_CONFIGS[MODEL]['server_config']['base_url']`
+与服务地址一致。Qwen3.5-9B 默认使用 `http://127.0.0.1:8001/v1`，其他本地模型仍使用 8000 端口。
+模型通过注册字典自动选择 `VLLMBackend + QwenProtocol`。
+
+Qwen3.5 的配置只传 `enable_thinking`；本地模板不读取 `reasoning_effort` 或
+`preserve_thinking`，因此不填写这两个选项。旧 Qwen 模型仍按各自配置传递这些参数。
+工具调用由框架解析原始 XML 文本，启动时不要添加 `--enable-auto-tool-choice` 或
+`--tool-call-parser`，客户端继续发送工具 schema 和 `tool_choice="none"`。
+
 ## Qwen3.8-Flash-Next-FP8 (vLLM 0.31.0)
 
 Uses the native 262,144-token context window without RoPE scaling overrides.
 
 ```bash
-CUDA_VISIBLE_DEVICES=2,3 \
+CUDA_VISIBLE_DEVICES=0,1 \
 VLLM_ENGINE_READY_TIMEOUT_S=3600 \
 VLLM_PLE_CPU_OFFLOAD=1 \
 vllm serve /data4/haibo/weights/Qwen3.8-Flash-Next-FP8 \
@@ -166,4 +210,58 @@ vllm serve /data4/haibo/weights/Qwen3.8-27B-FP8 \
   --no-enable-flashinfer-autotune \
   --allowed-local-media-path /data4/haibo \
   --limit-mm-per-prompt '{"image":100,"video":100}'
+```
+
+以下两个模型的命令参考 [AgentHarness/SERVING.md](../AgentHarness/SERVING.md)，原仓库使用 vLLM 0.30.0。
+端口分别调整为 8002 和 8003，GPU 编号、并行度和显存配置按实际可用硬件调整。
+客户端解析原生工具文本，因此两个服务也不启用自动工具解析。
+DeepSeek 保留原仓库的 `deepseek_v41` tokenizer 和 Engram CPU offload 参数。
+
+## GLM-5.3-Flash
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1,2,3 \
+VLLM_ENGINE_READY_TIMEOUT_S=3600 \
+vllm serve /data4/haibo/weights/GLM-5.3-Flash \
+  --served-model-name glm-5.3-flash \
+  --host 127.0.0.1 \
+  --port 8002 \
+  --dtype bfloat16 \
+  --tensor-parallel-size 4 \
+  --max-model-len 1048576 \
+  --allowed-local-media-path /data4/haibo \
+  --limit-mm-per-prompt '{"image":100,"video":100}' \
+  --max-num-seqs 16 \
+  --gpu-memory-utilization 0.95 \
+  --enable-prefix-caching \
+  --enable-prompt-tokens-details \
+  --no-enable-flashinfer-autotune \
+  --attention-backend FLASH_ATTN_MLA_SPARSE
+```
+
+## DeepSeek-V4.1-Flash
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1,2,3 \
+VLLM_ENGINE_READY_TIMEOUT_S=3600 \
+vllm serve /data4/haibo/weights/DeepSeek-V4.1-Flash \
+  --served-model-name deepseek-v4.1-flash \
+  --host 127.0.0.1 \
+  --port 8003 \
+  --tensor-parallel-size 4 \
+  --tokenizer-mode deepseek_v41 \
+  --engram-config '{"cpu_offload":true}' \
+  --kv-cache-dtype fp8 \
+  --max-model-len 1048576 \
+  --max-num-seqs 16 \
+  --max-num-batched-tokens 8192 \
+  --gpu-memory-utilization 0.95 \
+  --enable-prefix-caching \
+  --enable-prompt-tokens-details \
+  --no-enable-flashinfer-autotune \
+  --mm-encoder-tp-mode data \
+  --enable-expert-parallel \
+  --enforce-eager \
+  --allowed-local-media-path /data4/haibo \
+  --limit-mm-per-prompt '{"image":100}'
 ```

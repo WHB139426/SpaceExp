@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-import copy
-import json
 import re
 import uuid
 
 from ..types import Message, ModelInput, ModelOutput
+from .common import parse_value, prepare_messages
 
 
 TOOL_CALL_RE = re.compile(
@@ -17,37 +16,26 @@ PARAMETER_RE = re.compile(r"<parameter=([^>]+)>\s*(.*?)\s*</parameter>", re.S)
 STOP_TOKEN_RE = re.compile(r"(?:<\|im_end\|>\s*)+$")
 
 
-def _parse_value(value: str) -> object:
-    try:
-        return json.loads(value)
-    except json.JSONDecodeError:
-        return value
-
-
 class QwenProtocol:
     """Qwen chat-template options and text tool-call protocol."""
 
-    def __init__(self, *, enable_thinking: bool, reasoning_effort: str, preserve_thinking: bool) -> None:
-        if reasoning_effort not in {"low", "medium", "xhigh"}:
+    def __init__(self, *, enable_thinking: bool, reasoning_effort: str | None = None,
+                 preserve_thinking: bool | None = None) -> None:
+        if reasoning_effort is not None and reasoning_effort not in {"low", "medium", "xhigh"}:
             raise ValueError("reasoning_effort must be 'low', 'medium', or 'xhigh'")
         self.enable_thinking = enable_thinking
         self.reasoning_effort = reasoning_effort
         self.preserve_thinking = preserve_thinking
 
     def render(self, messages: list[Message], tools: list[dict[str, object]]) -> ModelInput:
-        prepared = copy.deepcopy(messages)
-        for message in prepared:
-            for call in message.get("tool_calls", []):
-                function = call["function"]
-                function["arguments"] = json.dumps(function["arguments"], ensure_ascii=False)
         return ModelInput(
-            messages=prepared,
+            messages=prepare_messages(messages),
             tools=tools,
-            chat_template_kwargs={
+            chat_template_kwargs={key: value for key, value in {
                 "enable_thinking": self.enable_thinking,
                 "reasoning_effort": self.reasoning_effort,
                 "preserve_thinking": self.preserve_thinking,
-            },
+            }.items() if value is not None},
         )
 
     def parse(self, text: ModelOutput) -> Message:
@@ -64,7 +52,7 @@ class QwenProtocol:
         calls = []
         for match in TOOL_CALL_RE.finditer(content):
             arguments = {
-                parameter.group(1).strip(): _parse_value(parameter.group(2).strip())
+                parameter.group(1).strip(): parse_value(parameter.group(2).strip())
                 for parameter in PARAMETER_RE.finditer(match.group(2))
             }
             calls.append({
