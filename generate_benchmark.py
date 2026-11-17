@@ -1,8 +1,9 @@
-"""Generate image-goal navigation tasks from all reconstructed test scenes."""
+"""Generate paired first-person and top-down navigation tasks from a scene split."""
 
 from collections import Counter
 import hashlib
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -11,15 +12,14 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from main_agent import SCENE_CONFIG
 from scene.boundary import build_boundary, movement_block_reason
 
 
 DATA_ROOT = Path('/data4/haibo/data/3D_Env')
-TEST_SPLIT = DATA_ROOT / 'test.json'
+TEST_SPLIT = DATA_ROOT / 'train.json'
 OUTPUT_DIR = Path(__file__).resolve().parent / 'outputs'
-OUTPUT_JSON = OUTPUT_DIR / 'benchmark_test.json'
-PREVIEW_DIR = OUTPUT_DIR / 'benchmark_test_previews'
+OUTPUT_JSON = OUTPUT_DIR / 'benchmark_train.json'
+PREVIEW_DIR = OUTPUT_DIR / 'benchmark_train_previews'
 SEED = 42
 TASKS_PER_SCENE = 6  # Upper limit; accept scenes with fewer valid tasks.
 DISTANCE_QUOTAS = {'near': 2, 'medium': 2, 'far': 2}  # Selection preferences, not required counts.
@@ -33,8 +33,19 @@ MAX_ABS_ROLL_DEGREES = 5  # Both initial and target views must be nearly upright
 MAX_ROLL_DIFFERENCE_DEGREES = 10
 MAX_ABS_PITCH_DEGREES = 60
 MAX_TARGET_PITCH_DEGREES = 20  # Positive means looking up relative to the estimated ground plane.
-MIN_CONTRAST = 8
-MIN_SHARPNESS = 10  # Laplacian variance after thumbnailing.
+VIEW_FILTER_CONFIG = {
+    'feature_long_edge': 384,
+    'border_crop': 0.03,
+    'min_normalization_span': 40,
+    'grid_size': 4,
+    'min_contrast': 8,
+    'min_sharpness': 10,
+    'min_cell_edge_density': 0.015,
+    'min_cell_entropy': 1.5,
+    'min_keep_corners': 30,
+    'min_keep_coverage': 0.375,  # At least 6 of 16 cells with structure.
+    'min_keep_score': 45,
+}
 MAX_POSE_STEP = 1.5
 MAX_POSE_SPEED = 3.0
 MAX_REFERENCE_DETOUR = 6.0
@@ -50,17 +61,62 @@ ROUTE_OVERLAP_WEIGHT = 1.0  # Soft penalty, not a collision check or hard reject
 SUCCESS_DISTANCE = 0.3
 SUCCESS_VIEW_ANGLE_DEGREES = 15
 MAP_CONFIG = {
-    **SCENE_CONFIG,
+    'blender': '/data4/haibo/software/blender/blender-4.5.13-linux-x64/blender',
+    'timeout': 300,
     'resolution': 128,
     'samples': 1,
+    'point_radius': 0.015,
+    'up': None,  # Estimate the ground direction from the scene.
     'trajectory_resolution': 800,
     'trajectory_samples': 2,
+    'trajectory_max_height': 1.8,
     'trajectory_dpi': 80,
+    'trajectory_arrow_length': 0.25,
     'boundary_enforced': True,
     'boundary_preview': True,
+    'boundary_cell_size': 0.05,
+    'boundary_close_radius': 0.15,
+    'camera_radius': 0.15,
 }
 PREVIEW_DPI = 90
 MAX_PREVIEW_POINTS = 750_000  # Rendering only; geometry checks use the full cloud.
+GOAL_IMAGE_DIR = DATA_ROOT / 'top_down_goals'
+GOAL_IMAGE_RESOLUTION = 960
+GOAL_DPI = 120
+GOAL_ARROW_LENGTH = 0.35  # Meters, for both horizontal direction arrows.
+GOAL_START_COLOR = '#20c56b'
+GOAL_TARGET_COLOR = '#ff8c00'
+
+
+def merge_goal_tasks(first_person, top_down):
+    """Keep sibling variants adjacent, with shared pair IDs and distinct task IDs."""
+    goals = {}
+    for task in top_down:
+        if task.get('goal_type') != 'top_down' or not task.get('pair_id'):
+            raise ValueError('Top-down tasks require goal_type and pair_id')
+        key = task['scene'], task['pair_id']
+        if key in goals:
+            raise ValueError(f'Duplicate top-down sibling: {key}')
+        goals[key] = task
+    merged, seen = [], set()
+    for task in first_person:
+        if task.get('goal_type', 'first_person') != 'first_person':
+            raise ValueError('Expected first-person base tasks')
+        pair_id = task.get('pair_id', task['id'])
+        key = task['scene'], pair_id
+        if key in seen or key not in goals:
+            raise ValueError(f'Duplicate pair or missing top-down sibling: {key}')
+        seen.add(key)
+        goal = goals[key]
+        if any(task[field] != goal[field] for field in ['initial_view', 'target_view']):
+            raise ValueError(f'Sibling endpoints differ: {key}')
+        if task['id'] == goal['id']:
+            raise ValueError(f'Siblings must have different task IDs: {key}')
+        merged.extend([{**task, 'pair_id': pair_id, 'goal_type': 'first_person',
+                        'direction_metric': 'forward_angle'}, goal])
+    if seen != set(goals):
+        raise ValueError('Top-down siblings contain unmatched pairs')
+    return merged
 
 
 def write_json(path, value):
@@ -77,21 +133,91 @@ def eligible_scenes():
                                           for file in ('cameras.json', 'reconstruction.ply'))]
 
 
-def image_quality(path):
+def entropy(gray):
+    counts = np.bincount((gray.ravel() // 8), minlength=32)
+    probabilities = counts[counts > 0] / gray.size
+    return float(-(probabilities * np.log2(probabilities)).sum())
+
+
+def analyze_view(path, config=None):
+    """Return filter metrics and overlay data; only decision=keep is eligible."""
+    import cv2
     from PIL import Image
 
+    config = {**VIEW_FILTER_CONFIG, **(config or {})}
     with Image.open(path) as image:
-        image = image.convert('L')
-        image.thumbnail((320, 240))
-        gray = np.asarray(image, dtype=float)
-    if min(gray.shape) < 3 or gray.std() < MIN_CONTRAST:
-        return 0.0
-    laplacian = (gray[2:, 1:-1] + gray[:-2, 1:-1] + gray[1:-1, 2:] + gray[1:-1, :-2]
-                 - 4 * gray[1:-1, 1:-1])
-    return float(laplacian.var())
+        image = image.convert('RGB')
+        if min(image.size) < max(3, config['grid_size']):
+            raise ValueError('Image is too small to evaluate view structure')
+        old = image.convert('L')
+        old.thumbnail((320, 240))
+        legacy = np.asarray(old, dtype=float)
+        contrast = float(legacy.std())
+        lap = legacy[2:, 1:-1] + legacy[:-2, 1:-1] + legacy[1:-1, 2:] + legacy[1:-1, :-2] - 4 * legacy[1:-1, 1:-1]
+        sharpness = float(lap.var())
+        image.thumbnail((config['feature_long_edge'], config['feature_long_edge']))
+        rgb = np.asarray(image)
+    h, w = rgb.shape[:2]
+    by, bx = round(h * config['border_crop']), round(w * config['border_crop'])
+    rgb = rgb[by:h - by, bx:w - bx].copy()
+    gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
+    # Normalize exposure before measuring structure; limit amplification of noise.
+    low, high = np.percentile(gray, [2, 98])
+    gray = np.clip((gray.astype(float) - low) * 255 / max(float(high - low), config['min_normalization_span']), 0, 255).astype(np.uint8)
+    smooth = cv2.GaussianBlur(gray, (0, 0), 1.5)
+    edges = cv2.Canny(smooth, 50, 120, L2gradient=True)
+    mask = cv2.dilate(edges, np.ones((5, 5), np.uint8))
+    points = cv2.goodFeaturesToTrack(smooth, maxCorners=300, qualityLevel=.02,
+                                   minDistance=8, blockSize=7, mask=mask)
+    points = np.empty((0, 2)) if points is None else points[:, 0, :]
+    h, w = gray.shape
+    cells = []
+    for row in range(config['grid_size']):
+        for col in range(config['grid_size']):
+            x0, x1 = col * w // config['grid_size'], (col + 1) * w // config['grid_size']
+            y0, y1 = row * h // config['grid_size'], (row + 1) * h // config['grid_size']
+            density = float((edges[y0:y1, x0:x1] > 0).mean())
+            information = entropy(gray[y0:y1, x0:x1])
+            corners = int(((points[:, 0] >= x0) & (points[:, 0] < x1) &
+                           (points[:, 1] >= y0) & (points[:, 1] < y1)).sum())
+            active = density >= config['min_cell_edge_density'] and corners >= 1 and information >= config['min_cell_entropy']
+            cells.append({'box': [x0, y0, x1, y1], 'edge_density': density,
+                          'entropy': information, 'corners': corners, 'active': bool(active)})
+    coverage = sum(cell['active'] for cell in cells) / len(cells)
+    edge_density = float((edges > 0).mean())
+    local_entropy = float(np.mean([cell['entropy'] for cell in cells]))
+    score = 100 * (.35 * min(coverage / .6, 1) + .30 * min(len(points) / 60, 1)
+                   + .25 * min(edge_density / .07, 1) + .10 * min(local_entropy / 3, 1))
+    lines = cv2.HoughLinesP(edges, 1, np.pi / 180, 35, minLineLength=min(h, w) * .15, maxLineGap=8)
+    parallel_share = 0.0
+    if lines is not None and len(lines) >= 4:
+        delta = lines[:, 0, 2:] - lines[:, 0, :2]
+        angles = np.degrees(np.arctan2(delta[:, 1], delta[:, 0])) % 180
+        weights = np.linalg.norm(delta, axis=1)
+        histogram = np.bincount((angles // 10).astype(int), weights=weights, minlength=18)
+        parallel_share = float((np.roll(histogram, 1) + histogram + np.roll(histogram, -1)).max() / weights.sum())
+    legacy_pass = contrast >= config['min_contrast'] and sharpness >= config['min_sharpness']
+    if not legacy_pass:
+        decision, reason = 'reject', 'low_contrast' if contrast < config['min_contrast'] else 'blurred'
+    elif (edge_density < .006 and len(points) < 12) or (len(points) < 10 and coverage < .3125):
+        decision, reason = 'reject', 'sparse_structure'
+    elif (score < config['min_keep_score'] or len(points) < config['min_keep_corners'] or coverage < config['min_keep_coverage']):
+        decision, reason = 'review', 'limited_structure'
+    elif parallel_share >= .8 and len(points) < 60:
+        decision, reason = 'review', 'mostly_parallel_edges'
+    else:
+        decision, reason = 'keep', 'sufficient_structure'
+    metrics = {'decision': decision, 'reason': reason, 'score': round(score, 2),
+               'legacy_pass': legacy_pass, 'contrast': contrast, 'sharpness': sharpness,
+               'edge_density': edge_density, 'corner_count': len(points), 'coverage': coverage,
+               'mean_local_entropy': local_entropy, 'parallel_share': parallel_share}
+    return metrics, (rgb, edges, points, cells)
 
 
-def candidates(directory, cameras, poses, up, frame):
+
+def candidates(directory, cameras, poses, up, frame, *, filter_stats=None):
+    if filter_stats is None:
+        filter_stats = Counter()
     positions, forward = poses[:, :3, 3], poses[:, :3, 2]
     heading = forward - (forward @ up)[:, None] * up
     heading /= np.maximum(np.linalg.norm(heading, axis=1, keepdims=True), 1e-12)
@@ -112,16 +238,22 @@ def candidates(directory, cameras, poses, up, frame):
         path = (directory / camera['image_path']).resolve()
         if not path.is_relative_to((directory / 'frames').resolve()) or not path.is_file():
             continue
+        filter_stats['checked'] += 1
         try:
-            quality = image_quality(path)
+            quality, _ = analyze_view(path, VIEW_FILTER_CONFIG)
         except (OSError, ValueError):
+            filter_stats['unreadable'] += 1
             continue
-        if quality < MIN_SHARPNESS:
+        filter_stats[quality['decision']] += 1
+        filter_stats[f"reason:{quality['reason']}"] += 1
+        if quality['decision'] != 'keep':
             continue
+        # Filter both endpoint roles before selecting the sharpest grid representative.
+        sharpness = quality['sharpness']
         key = (*np.floor(xy[i] / POSITION_BIN).astype(int), int(np.floor(heights[i] / HEIGHT_BIN)),
                int(yaw[i] // HEADING_BIN_DEGREES), int((pitch[i] + 90) // PITCH_BIN_DEGREES))
-        if key not in groups or quality > groups[key][0]:
-            groups[key] = (quality, i)
+        if key not in groups or sharpness > groups[key][0]:
+            groups[key] = (sharpness, i)
     return sorted(i for _, i in groups.values()), positions, heading, roll, heights, xy
 
 
@@ -177,10 +309,11 @@ def route_overlap(cells, other):
     return len(cells & other) / min(len(cells), len(other)) if cells and other else 0.0
 
 
-def choose_pairs(directory, cameras, poses, frame, points, rng):
+def choose_pairs(directory, cameras, poses, frame, points, rng, *, filter_stats=None):
     up = np.asarray(frame['up'], dtype=float)
     up /= np.linalg.norm(up)
-    indices, positions, heading, roll, heights, xy = candidates(directory, cameras, poses, up, frame)
+    indices, positions, heading, roll, heights, xy = candidates(
+        directory, cameras, poses, up, frame, filter_stats=filter_stats)
     forward = poses[:, :3, 2].copy()
     forward /= np.linalg.norm(forward, axis=1, keepdims=True)
     pitch = np.degrees(np.arcsin(np.clip(forward @ up, -1, 1)))
@@ -188,7 +321,7 @@ def choose_pairs(directory, cameras, poses, frame, points, rng):
         boundary = dict(saved)
     indices = [i for i in indices if movement_block_reason(boundary, positions[i], heading[i], 0) is None]
     if len(indices) < 2:
-        raise ValueError(f'Only {len(indices)} usable position/orientation representatives')
+        raise ValueError(f'Only {len(indices)} usable representatives after Keep-only view filtering and boundary checks')
     ids = np.asarray(indices)
     frame_indices = np.asarray([camera['video_frame_index'] for camera in cameras])
     distances = np.linalg.norm(xy[ids, None] - xy[ids][None, :], axis=2)
@@ -358,6 +491,50 @@ def save_preview(directory, cameras, poses, frame, pair, output):
         plt.close(fig)
 
 
+def ground_markers(frame, initial_pose, target_pose):
+    basis = np.column_stack((frame['right'], frame['ahead']))
+    positions = np.stack((initial_pose[:3, 3], target_pose[:3, 3]))
+    xy = (positions - frame['origin']) @ basis
+    directions = np.stack((initial_pose[:3, 2], target_pose[:3, 2])) @ basis
+    lengths = np.linalg.norm(directions, axis=1)
+    if not np.isfinite(xy).all() or not np.isfinite(directions).all() or np.any(lengths < 1e-6):
+        raise ValueError('Both endpoints need a finite position and a defined horizontal viewing direction')
+    return xy, directions / lengths[:, None]
+
+
+def draw_goal(frame, initial_pose, target_pose, output):
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+
+    xy, directions = ground_markers(frame, initial_pose, target_pose)
+    tips = xy + directions * GOAL_ARROW_LENGTH
+    low = np.minimum([frame['xlim'][0], frame['ylim'][0]], np.minimum(xy, tips).min(axis=0) - .15)
+    high = np.maximum([frame['xlim'][1], frame['ylim'][1]], np.maximum(xy, tips).max(axis=0) + .15)
+    fig, ax = plt.subplots(figsize=(GOAL_IMAGE_RESOLUTION / GOAL_DPI, GOAL_IMAGE_RESOLUTION / GOAL_DPI), constrained_layout=True)
+    temporary = output.with_suffix('.tmp.png')
+    try:
+        ax.imshow(plt.imread(frame['background']), extent=frame['image_extent'], origin='upper',
+                  interpolation='nearest', zorder=1)
+        for i, (color, marker, label, size) in enumerate([
+            (GOAL_START_COLOR, 'o', 'Start', 130), (GOAL_TARGET_COLOR, '*', 'Target', 270),
+        ]):
+            ax.scatter(*xy[i], c=color, marker=marker, s=size, edgecolors='white', linewidths=1.3,
+                       zorder=10 + i * 2, label=label)
+            ax.quiver(*xy[i], *(directions[i] * GOAL_ARROW_LENGTH), angles='xy', scale_units='xy', scale=1,
+                      color=color, edgecolors='white', linewidths=.7, width=.009, zorder=11 + i * 2)
+        ax.set(xlim=(low[0], high[0]), ylim=(low[1], high[1]), aspect='equal',
+               xlabel='Ground X (approx. m)', ylabel='Ground Y (approx. m)')
+        ax.set_title('Top-down navigation goal', pad=44)
+        ax.legend(loc='lower left', bbox_to_anchor=(0, 1.01), ncol=2, framealpha=1)
+        fig.savefig(temporary, dpi=GOAL_DPI, transparent=False, facecolor='white')
+        temporary.replace(output)
+    finally:
+        plt.close(fig)
+        temporary.unlink(missing_ok=True)
+
+
+
 def prepare_map(job_path):
     """Run inside Blender; keep complete geometry for floor and boundary estimation."""
     import bpy
@@ -390,7 +567,7 @@ def prepare_map(job_path):
     write_json(Path(job['output']) / 'frame.json', frame)
 
 
-def process_scene(name):
+def process_scene(name, *, filter_stats=None):
     import open3d as o3d
 
     directory = DATA_ROOT / name
@@ -419,8 +596,11 @@ def process_scene(name):
     cloud = o3d.io.read_point_cloud(str(directory / 'reconstruction.ply'))
     points = np.asarray(cloud.points)
     scene_seed = SEED + int(hashlib.sha256(name.encode()).hexdigest()[:8], 16)
-    pairs, summary = choose_pairs(directory, cameras, poses, frame, points, np.random.default_rng(scene_seed))
-    tasks = []
+    pairs, summary = choose_pairs(directory, cameras, poses, frame, points, np.random.default_rng(scene_seed),
+                                  filter_stats=filter_stats)
+    tasks, top_down_tasks = [], []
+    goal_output = GOAL_IMAGE_DIR / name
+    goal_output.mkdir(parents=True, exist_ok=True)
     for n, pair in enumerate(pairs, 1):
         task_id = f'{Path(name).name}_{n:04d}'
         preview = output / f'{task_id}.jpg'
@@ -433,27 +613,46 @@ def process_scene(name):
         task['reference_route'] = [cameras[i]['image_path'] for i in pair['route_indices']]
         task['preview'] = str(preview.relative_to(OUTPUT_JSON.parent))
         tasks.append(task)
+        goal_image = goal_output / f'{task_id}.png'
+        draw_goal(frame, poses[pair['initial_index']], poses[pair['target_index']], goal_image)
+        relative_goal = goal_image.relative_to(DATA_ROOT).as_posix()
+        top_down_tasks.append({
+            **task, 'id': task_id + '_top_down', 'pair_id': task_id, 'goal_type': 'top_down',
+            'goal_image': relative_goal,
+            'preview': Path(os.path.relpath(goal_image, OUTPUT_JSON.parent)).as_posix(),
+            'direction_metric': 'horizontal_heading', 'scene_up': frame['up'],
+        })
     # A previous run may have produced more tasks for this accepted scene.
     current_previews = {task['preview'] for task in tasks}
     for stale in output.glob(f'{Path(name).name}_????.jpg'):
         if str(stale.relative_to(OUTPUT_JSON.parent)) not in current_previews:
             stale.unlink()
-    return tasks, summary
+    current_goals = {f'{task["id"]}.png' for task in tasks}
+    for stale in goal_output.glob(f'{Path(name).name}_????.png'):
+        if stale.name not in current_goals:
+            stale.unlink()
+    merged = merge_goal_tasks(tasks, top_down_tasks)
+    summary.update(pairs=len(tasks), tasks=len(merged),
+                   goal_types={'first_person': len(tasks), 'top_down': len(tasks)})
+    return merged, summary
 
 
 def main():
+    import cv2
     from tqdm import tqdm
 
+    cv2.setNumThreads(1)
     if sum(DISTANCE_QUOTAS.values()) != TASKS_PER_SCENE:
         raise ValueError('DISTANCE_QUOTAS must sum to TASKS_PER_SCENE')
     if not -90 <= MAX_TARGET_PITCH_DEGREES <= 90:
         raise ValueError('MAX_TARGET_PITCH_DEGREES must be between -90 and 90')
     pool = eligible_scenes()
     if not pool:
-        raise ValueError('No reconstructed test scenes are available')
+        raise ValueError('No reconstructed scenes are available in the selected split')
     order = np.random.default_rng(SEED).permutation(pool).tolist()
     OUTPUT_JSON.parent.mkdir(parents=True, exist_ok=True)
     PREVIEW_DIR.mkdir(parents=True, exist_ok=True)
+    GOAL_IMAGE_DIR.mkdir(parents=True, exist_ok=True)
     report = {
         'seed': SEED, 'test_split': str(TEST_SPLIT), 'candidate_order': order,
         'settings': {key: value for key, value in globals().items()
@@ -466,6 +665,17 @@ def main():
                         'Positive pitch looks up. This is a pose filter, not semantic ceiling detection.',
         'endpoint_roll': 'Both initial and target views must satisfy abs(roll) <= MAX_ABS_ROLL_DEGREES '
                          'relative to the estimated scene up; original images and camera poses are not modified.',
+        'view_filter': {
+            'policy': 'Only Keep views can be initial or target endpoints; Review and Reject are excluded before grid deduplication. '
+                      'Intermediate reference-route frames are retained. Counts cover pose-eligible endpoint images before deduplication.',
+            'scenes': {}, 'totals': {},
+        },
+        'goal_variants': {'pairs': 0, 'tasks': 0, 'first_person': 0, 'top_down': 0},
+        'top_down_goals': {
+            'image_dir': str(GOAL_IMAGE_DIR), 'resolution': GOAL_IMAGE_RESOLUTION,
+            'contents': 'Static background, start and target positions and horizontal direction arrows; no route or execution history.',
+            'position_metric': 'euclidean_3d', 'direction_metric': 'horizontal_heading',
+        },
         'diversity': 'Near-duplicate initial and target views are checked separately against selected endpoints. '
                      'Target spread is the nearest previously selected target distance, normalized by candidate ground diameter. '
                      'Route overlap is shared ground cells / smaller footprint size; a soft selection penalty. '
@@ -473,34 +683,45 @@ def main():
         'scenes': {}, 'rejected_scenes': {}, 'complete': False,
     }
     tasks = []
+    filter_totals = Counter()
+    goal_counts = Counter()
     with tqdm(total=len(pool), desc='Benchmark scenes', unit='scene') as progress:
         for name in order:
             tqdm.write(f'Generating: {name}')
+            filter_stats = Counter(checked=0, keep=0, review=0, reject=0, unreadable=0)
+            report['view_filter']['scenes'][name] = filter_stats
             try:
-                selected, summary = process_scene(name)
+                selected, summary = process_scene(name, filter_stats=filter_stats)
             except ValueError as error:
                 report['rejected_scenes'][name] = f'{type(error).__name__}: {error}'
                 tqdm.write(f'SKIP {name}: {error}')
             else:
                 tasks.extend(selected)
+                goal_counts.update(task['goal_type'] for task in selected)
                 report['scenes'][name] = summary
-                tqdm.write(f'Accepted {name}: {len(selected)}/{TASKS_PER_SCENE} tasks; '
-                           f'{dict(Counter(t["distance_group"] for t in selected))}')
+                tqdm.write(f'Accepted {name}: {summary["pairs"]}/{TASKS_PER_SCENE} pairs, '
+                           f'{len(selected)} task variants; {summary["distance_groups"]}')
+            filter_totals.update(filter_stats)
+            report['view_filter']['totals'] = dict(filter_totals)
+            report['goal_variants'] = {'pairs': goal_counts['first_person'], 'tasks': len(tasks),
+                                       'first_person': goal_counts['first_person'], 'top_down': goal_counts['top_down']}
             progress.update(1)
             report['complete'] = len(report['scenes']) + len(report['rejected_scenes']) == len(pool)
             write_json(OUTPUT_JSON, tasks)
             write_json(OUTPUT_JSON.with_suffix('.report.json'), report)
     index = ['# Navigation benchmark previews', '', 'Blue: projected reference route. Green: initial. Orange: target.', '']
     for task in tasks:
-        relative = (OUTPUT_JSON.parent / task['preview']).relative_to(PREVIEW_DIR)
-        index.append(f"- [{task['id']}]({relative.as_posix()}) — {task['distance_group']}, {task['ground_distance_m']:.2f} m")
+        relative = Path(os.path.relpath(OUTPUT_JSON.parent / task['preview'], PREVIEW_DIR)).as_posix()
+        index.append(f"- [{task['id']}]({relative}) — {task['goal_type']}, {task['distance_group']}, {task['ground_distance_m']:.2f} m")
     (PREVIEW_DIR / 'index.md').write_text('\n'.join(index) + '\n')
     for name in set(pool) - set(report['scenes']):
         scene_id = Path(name).name
         for stale in (PREVIEW_DIR / scene_id).glob(f'{scene_id}_????.jpg'):
             stale.unlink()
+        for stale in (GOAL_IMAGE_DIR / name).glob(f'{scene_id}_????.png'):
+            stale.unlink()
     print(f'Scenes: accepted={len(report["scenes"])}, rejected={len(report["rejected_scenes"])}, '
-          f'total={len(pool)}; tasks: {len(tasks)}; JSON: {OUTPUT_JSON}', flush=True)
+          f'total={len(pool)}; pairs: {goal_counts["first_person"]}; tasks: {len(tasks)}; JSON: {OUTPUT_JSON}', flush=True)
 
 
 if __name__ == '__main__':

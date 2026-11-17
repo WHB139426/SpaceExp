@@ -6,8 +6,10 @@
 
 tmp/*
 outputs/*
+backup/*
 update.sh
 
 benchmark_test_previews/*
 benchmark_test.json
 benchmark_test.report.json
+

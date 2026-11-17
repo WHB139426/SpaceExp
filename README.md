@@ -32,14 +32,14 @@ GPT 使用 `store=False`，每轮由本地重传历史，不使用 `previous_res
 
 手动探索使用 `python main_env.py`，无需模型服务。场景和渲染参数在该文件顶部的 `SCENE_CONFIG` 中独立配置。启动后自动保存初始观察，随后每行输入一个动作，例如 `move_forward 0.3`、`turn_left 30`、`turn_up 15`；省略幅度则使用配置的默认步长。`observe` 再次观察，`help` 显示命令，`/new` 在新目录重置环境，`/exit` 退出。输出保存在 `outputs/env_<场景名>_<时间戳>/`；终端显示当前第一视角图片和最新俯视轨迹图的路径，打开保存的 PNG 即可查看。
 
-非交互式图像目标导航使用 `python main_nav.py`。在文件顶部配置 `INITIAL_VIEW`、`GOAL_VIEW` 和英文 `PROMPT`；两张图片必须来自场景的 `frames/` 且能在 `cameras.json` 中匹配。环境从 initial view 的完整相机位姿启动，模型接收两张参考图及任务文本。`MODEL`、模型生成参数、服务地址、输出目录、系统提示词以及 agent、场景和工具配置均在 `main_nav.py` 内独立定义，不从 `main_agent.py` 导入。两个入口的配置分别维护。
+非交互式图像目标导航使用 `python main_nav.py`。在文件顶部配置 `BENCHMARK_JSON`、`GOAL_MODE` 和英文 `PROMPT`；从 benchmark 随机抽取一组起终点配对。初始帧与 GT 目标帧必须来自场景的 `frames/` 且能在 `cameras.json` 中匹配。环境从 initial view 的完整相机位姿启动，模型接收两张参考图及任务文本。`MODEL`、模型生成参数、服务地址、输出目录、系统提示词以及 agent、场景和工具配置均在 `main_nav.py` 内独立定义，不从 `main_agent.py` 导入。两个入口的配置分别维护。
 
 批量导航运行 `python main_nav_batch.py`。该入口在文件顶部独立维护模型、agent、工具、场景、提示词、`DATA_ROOT`、`BENCHMARK_JSON`、`OUTPUT_DIR` 和 `RESUME_DIR` 配置，不导入其他 main 文件。默认按 JSON 顺序运行全部任务，tqdm 显示整体进度。整个批次复用模型客户端；每条任务新建 Agent 和 Blender 环境，使用该条 initial/target 的相机参数，聊天、相机状态和轨迹相互独立。单条运行异常会记录为 `termination="error"` 并继续下一条；步数耗尽记为失败，`finish_task` 保留模型自报结果。配置或模型客户端初始化错误会直接报错。
 
 批量输出结构如下，每条任务的输出内容与单任务入口一致：
 
 ```text
-outputs/nav_batch_<model>_<timestamp>/
+outputs/nav_batch_<model>_<goal_mode>_<timestamp>/
 ├── run.json                  # Configuration snapshot; excludes API keys.
 ├── benchmark.json            # Exact input task list.
 ├── results.json              # Latest result for every attempted task, in benchmark order.
@@ -57,17 +57,27 @@ outputs/nav_batch_<model>_<timestamp>/
 
 每完成一条任务就原子更新结果与汇总；`summary.json` 的 `complete` 表示所有任务都已尝试结束，不代表全部成功。`self_reported_success_rate` 是已结束任务中模型自报成功的比例，尚未加入独立位姿评估；失败包括模型报告的 failure 和步数耗尽，运行异常及没有调用结束工具的回答另行计数。Ctrl+C 保存中断任务与已有进度后退出。将 `RESUME_DIR` 设为对应批次目录可续跑：跳过已有结果的任务（包括失败及 error），重新执行中断或未保存结果的任务，并保留旧尝试目录。续跑会检查任务清单和运行配置一致，还可从每条任务的 `result.json` 重建丢失的批量汇总。首次运行保持 `RESUME_DIR=None`。
 
-运行 `python generate_benchmark.py` 可生成测试 benchmark。配置位于文件顶部：默认用随机种子 42 打乱并遍历 `test.json` 中全部已重建场景，包括 ARKitScenes、ScanNet 和 ScanNet++，没有场景数量上限。每个场景需有 `cameras.json` 和 `reconstruction.ply`。进度条按已处理场景计数，包括被排除的场景；报告中的 `complete` 表示已遍历全部候选场景。每个场景最多生成 6 条任务，同一个 initial 最多生成 1 条，同一个 target 最多使用 1 次；起点和目标分别计算复用次数，同一帧仍可在不同任务中分别充当起点和目标。有效任务不足 6 条时保留已有结果，不因数量不足跳过整个场景；完全没有有效任务的场景仍排除，并在报告中记录原因。按位置、朝向、俯仰和高度分组去重，过滤模糊图像及异常姿态，约束起终点高度差不超过 0.15 米，并尽量平衡近、中、远距离及目标方位。所有任务必须满足原视频的 `initial_frame_index < target_frame_index`，参考路线也只沿视频时间向前。每条参考路线由连续视频位姿投影到起点高度，在该起点对应的外边界网格中逐段检查；不检查家具碰撞，也不将参考路线当作最短路径。生成过程不调用重建或语言模型，使用 Blender 渲染每个场景的俯视图背景。
+运行 `python generate_benchmark.py` 一次完成图片筛选、起终点配对、俯视目标图生成和两种任务合并。配置位于文件顶部；当前配置读取 `train.json`，写入 `outputs/benchmark_train.json`，预览保存到 `outputs/benchmark_train_previews/`。改为测试集时同时设置 `TEST_SPLIT`、`OUTPUT_JSON`、`PREVIEW_DIR`。使用随机种子 42 打乱并遍历所选 split 中全部已重建场景，包括 ARKitScenes、ScanNet 和 ScanNet++，没有场景数量上限。每个场景需有 `cameras.json` 和 `reconstruction.ply`。进度条按已处理场景计数，包括被排除的场景；报告中的 `complete` 表示已遍历全部候选场景。每个场景最多生成 6 组起终点配对（添加俯视兄弟后每组有 2 个任务变体），同一个 initial 最多用于 1 组配对，同一个 target 最多用于 1 组配对；起点和目标分别计算复用次数，同一帧仍可在不同任务中分别充当起点和目标。有效任务不足 6 条时保留已有结果，不因数量不足跳过整个场景；完全没有有效任务的场景仍排除，并在报告中记录原因。按位置、朝向、俯仰和高度分组去重，过滤模糊图像及异常姿态，约束起终点高度差不超过 0.15 米，并尽量平衡近、中、远距离及目标方位。所有任务必须满足原视频的 `initial_frame_index < target_frame_index`，参考路线也只沿视频时间向前。每条参考路线由连续视频位姿投影到起点高度，在该起点对应的外边界网格中逐段检查；不检查家具碰撞，也不将参考路线当作最短路径。生成过程不调用重建或语言模型，使用 Blender 渲染每个场景的俯视图背景。
 
 `MAX_TARGET_PITCH_DEGREES=20` 单独限制目标视角最多向上看 20°：俯仰角相对于估计地面计算，正值朝上、负值朝下。只过滤 target，initial 仍受原有 `MAX_ABS_PITCH_DEGREES=60` 限制；两者仍沿用侧倾、清晰度等其他筛选。每条任务额外记录 `target_pitch_degrees`，报告保存上限参数与角度约定。这是姿态过滤，不是天花板语义识别，不能保证画面中完全不出现天花板。新规则在重新运行生成脚本后生效。
 
 `MAX_ABS_ROLL_DEGREES=5` 要求 initial 和 target 的左右侧倾均在 ±5° 内，相对于估计的场景竖直方向判断。超限视角在候选去重之前排除，两端角度分别保存为 `initial_roll_degrees` 和 `target_roll_degrees`。这是选择近乎水平的原始帧，不旋转图片或修改相机外参；原有两端侧倾差不超过 `MAX_ROLL_DIFFERENCE_DEGREES=10` 的约束继续保留。
 
-任务清单写入 `outputs/benchmark_test.json`，`scene` 相对于数据根目录，`initial_view`、`target_view` 和 `reference_route` 中的图片路径相对于场景目录。三栏预览保存到 `outputs/benchmark_test_previews/`，可从其中的 `index.md` 查看；每张预览包含起点图片、目标图片和俯视参考路线。任务中的 `preview` 路径相对于 benchmark JSON 所在目录。`outputs/benchmark_test.report.json` 保存筛选参数、候选随机顺序、入选和排除原因，以及建议的成功阈值（位置 0.3 米、视线夹角 15°）；近、中、远各 2 条的配额只作为选择偏好，报告记录每场景实际任务数和分布。重新生成时移除该场景上一次多余的任务预览。`main_nav.py` 从 `BENCHMARK_JSON` 指向的新位置读取任务。benchmark 生成不会修改数据集文件或自动运行导航评估。
+候选图片在网格去重前执行结构筛选，initial 和 target 都只允许 **Keep**，**Review / Reject 均排除**。
+筛选逻辑直接位于 `generate_benchmark.py`：亮度归一化、边缘与角点检测、4×4 网格结构覆盖及局部信息量检查。
+阈值集中在 `generate_benchmark.py` 顶部的 `VIEW_FILTER_CONFIG`，默认至少 30 个角点、6/16 个有效网格，综合分数不低于 45，并检查主要为平行线的画面。
+不合格图片不能成为起终点；参考路线中间经过的原视频帧仍保留。有效端点不足时，该场景可能生成更少任务或被跳过。
+生成报告的 `view_filter.scenes` 和 `view_filter.totals` 记录每场景和全局的 Keep / Review / Reject 数量、读取失败数及原因；数量统计在姿态筛选后、网格去重前。
+
+
+任务清单写入 `OUTPUT_JSON`（当前为 `outputs/benchmark_train.json`），`scene` 相对于数据根目录，`initial_view`、`target_view` 和 `reference_route` 中的图片路径相对于场景目录。三栏预览保存到 `PREVIEW_DIR`（当前为 `outputs/benchmark_train_previews/`），可从其中的 `index.md` 查看；每张预览包含起点图片、目标图片和俯视参考路线。任务中的 `preview` 路径相对于 benchmark JSON 所在目录。`OUTPUT_JSON` 对应的 `.report.json` 保存筛选参数、候选随机顺序、入选和排除原因，以及建议的成功阈值（位置 0.3 米、视线夹角 15°）；近、中、远各 2 条的配额只作为选择偏好，报告记录每场景实际任务数和分布。重新生成时移除该场景上一次多余的任务预览。`main_nav.py` 从 `BENCHMARK_JSON` 指向的新位置读取任务。benchmark 生成不会修改数据集文件或自动运行导航评估。
 
 在网格候选基础上，任务选择还分别检查已选 initial 集合和 target 集合的连续位姿：地面距离小于 `VIEW_DEDUP_DISTANCE=0.5` 米、高度差小于 `VIEW_DEDUP_HEIGHT=0.15` 米、光学视线夹角小于 `VIEW_DEDUP_ANGLE_DEGREES=30` 度同时满足时，拒绝该角色的近重复视角；位置接近但朝向或高度明显不同仍可保留。同一帧跨起点/目标角色使用仍然允许。起点优先远离已选起点；目标评分在原距离配额优先级下，结合方位和转角覆盖，奖励远离已选目标的位置，并惩罚与已选参考路线重叠的配对。目标距离除以候选位置的地面最大间距归一化，权重为 `TARGET_SPREAD_WEIGHT`。路线采用独立的 `ROUTE_GRID_SIZE=0.5` 米网格，每段以不超过半格的间隔采样；重叠率为共享格子数除以两条路线较小的格子数，短路线被长路线完全包含时记为 1，权重为 `ROUTE_OVERLAP_WEIGHT`。这是软评分，不保证路线完全不重叠，也不是内部碰撞检测。任务额外保存选取当时的 `target_spread_m` 和 `max_route_overlap`；首条任务分别为 `null` 和 0。报告记录近重复筛除次数及最大路线重叠率。
 
 场景目录需要 `reconstruction.ply` 和 `cameras.json`；无需原视频或 `frames/`，不加载重建模型。初始位置、完整姿态（包括俯仰和侧倾）及内参使用第一帧的记录；仅将 OpenCV 相机坐标转换为 Blender 相机坐标，不调平、不修改眼高。渲染继续采用 `resolution` 指定的方形画面，保留原水平视场并扩展竖直视场。
+
+运行 `python generate_top_down_views.py` 为 `scannet`、`arkitscenes`、`scannetpp` 下已重建的场景生成纯俯视 PNG，保存到 `/data4/haibo/data/3D_Env/top_down_views/<dataset>/<scene>.png`。
+直接保存 Blender 的不透明场景背景，不叠加轨迹、相机、目标点、边界、坐标轴或图例。配置均在脚本顶部；默认 960×960、4 samples、离地裁剪高度 1.8 米，`OVERWRITE=True` 覆盖已有图片。进度条按场景计数，单个失败后继续并在最后列出失败场景。
 
 ## 模型工具
 
@@ -127,6 +137,47 @@ Agent 每次启动在 `outputs/chat_<场景名>_<模型名>_<时间戳>/` 保存
 `/new` 创建新的会话目录，清空聊天并恢复初始相机位姿，继续使用同一个已加载场景；旧目录保持原样。`/exit` 退出并关闭 Blender。
 
 普通 Python 运行 agent 和 NumPy / Matplotlib 轨迹绘图；渲染端使用 Blender 自带的 `bpy` 和 NumPy。探索过程不调用 PyTorch、Open3D、VGGT 或 DA3。
+
+## 俯视目标兄弟任务
+
+`generate_benchmark.py` 为每组选中的 initial → target 自动生成两个任务变体，并写入同一个 JSON，
+不再需要单独运行额外脚本。每个场景最多 6 对，即最多 12 条任务记录；配额和去重仍以配对为单位。
+第一视角任务使用原 ID，兄弟任务的 `id` 添加 `_top_down`，两者共享 `pair_id`，用 `goal_type` 区分。
+原始 `initial_view`、`target_view` 和参考路线继续保留。
+俯视任务另外保存 `goal_image`、`direction_metric="horizontal_heading"` 和 `scene_up`；
+第一视角任务保存 `direction_metric="forward_angle"`。`initial_view` 和 `target_view` 相对于场景目录；
+`goal_image` 相对于 `DATA_ROOT`，例如 `top_down_goals/scannetpp/<scene>/<配对ID>.png`，
+两个导航入口通过 `DATA_ROOT / goal_image` 读取；`preview` 相对于 benchmark JSON 所在目录。
+
+图片保存到 `GOAL_IMAGE_DIR/<source>/<scene>/<配对ID>.png`，默认目录为 `/data4/haibo/data/3D_Env/top_down_goals/`。
+分辨率、DPI、箭头长度和颜色由顶部 `GOAL_IMAGE_RESOLUTION`、`GOAL_DPI`、`GOAL_ARROW_LENGTH`、
+`GOAL_START_COLOR`、`GOAL_TARGET_COLOR` 控制。默认 960×960，只显示静态场景背景、绿色 Start 和
+橙色 Target 及两者的水平朝向箭头，不绘制参考路线、执行历史或目标第一视角。图例为英文，保留米制地面坐标尺度。
+每个场景只渲染一次俯视背景，所有配对复用该背景叠加标记。
+
+`PREVIEW_DIR/index.md` 同时链接第一视角配对预览和俯视目标图。报告中的 `goal_variants` 区分配对数、
+任务总数和两种类型数量；每场景统计同时记录 `pairs`、`tasks`、`goal_types`。
+重新生成时清理当前场景多余的配对预览和目标 PNG；生成失败或没有有效配对的场景也会清理其旧图。
+
+两个导航入口都在顶部独立配置一个参数，无需切换 benchmark 文件：
+
+```python
+GOAL_MODE = 'first_person'  # 'first_person', 'top_down', or 'both'.
+```
+
+`main_nav_batch.py` 运行所选类型的全部任务；`both` 按每对先 first-person、后 top-down 的顺序运行。
+`main_nav.py` 随机选择一个配对；`both` 连续运行该配对的两个版本。
+每次都新建 Agent、Blender 环境和输出目录，恢复同一 initial pose，聊天和执行轨迹不共享。
+单任务入口在 `both` 下即使第一个版本运行报错也会继续第二个版本，用户中断仍立即停止。
+批量输出目录包含 `GOAL_MODE`，`run.json` 记录所选模式，`benchmark.json` 只保存实际选中的任务。
+`summary.json` 保留总体统计，同时用 `by_goal_type` 分别统计两种任务，续跑会核对模式和任务清单。
+
+两个入口根据每条任务的 `goal_type` 选择目标图片，并从顶部 `GOAL_PROMPTS` 只拼入对应提示。
+旧任务缺少 `goal_type` 时按 `first_person` 处理；选择 `both` 时要求每组兄弟齐全且起终点一致。
+模型仍只接收 initial 和 goal 两张参考图：first-person 任务发送原目标帧，top-down 任务发送地图。
+本地额外保留 `target_view.*` 作 GT，地图另存为 `goal_image.png`，目标相机始终从原始 `target_view` 查找。
+`task.json` 保存实际英文 prompt，结果保存 `goal_type`、`pair_id`、`direction_metric`，俯视任务还保存 `scene_up`。
+后续客观评分应按 `direction_metric` 选择完整 forward 夹角或水平朝向夹角；summary 仍统计模型自报结果。
 
 ## vLLM 启动命令
 
@@ -191,7 +242,7 @@ Requires `transformers>=5.8.0`. Uses the native 262,144-token context window
 without RoPE scaling overrides.
 
 ```bash
-CUDA_VISIBLE_DEVICES=3 \
+CUDA_VISIBLE_DEVICES=0 \
 VLLM_ENGINE_READY_TIMEOUT_S=3600 \
 vllm serve /data4/haibo/weights/Qwen3.8-27B-FP8 \
   --served-model-name qwen3.8-27b \
@@ -244,7 +295,7 @@ vllm serve /data4/haibo/weights/GLM-5.3-Flash \
 ```bash
 CUDA_VISIBLE_DEVICES=0,1,2,3 \
 VLLM_ENGINE_READY_TIMEOUT_S=3600 \
-vllm serve /data4/haibo/weights/DeepSeek-V4.1-Flash \
+vllm serve /data4/haibo/weights/DeepSeek-V4.1-Flash-1017 \
   --served-model-name deepseek-v4.1-flash \
   --host 127.0.0.1 \
   --port 8003 \

@@ -8,6 +8,7 @@ import shutil
 import time
 
 from tqdm import tqdm
+import numpy as np
 
 from agent import Agent
 from agent.models import create_model, model_config_snapshot
@@ -18,10 +19,11 @@ from scene.client import CameraClient, reference_camera_state
 
 DATA_ROOT = Path('/data4/haibo/data/3D_Env')
 BENCHMARK_JSON = Path(__file__).resolve().parent / 'outputs' / 'sub_benchmark_test.json'
+GOAL_MODE = 'both'  # 'first_person', 'top_down', or 'both'.
 OUTPUT_DIR = Path(__file__).resolve().parent / 'outputs'
 RESUME_DIR = None  # Set to a previous nav_batch_* directory to continue it.
 
-MODEL = "qwen3.8-flash-next"
+MODEL = "qwen3.5-9b"
 
 MODEL_GENERATION_CONFIGS = {
     "glm-5.3-flash": {
@@ -43,7 +45,7 @@ MODEL_GENERATION_CONFIGS = {
         },
         "max_tokens": 16 * 1024,
         "temperature": 1.0,
-        "top_p": 0.95,
+        "top_p": 1.0,
         "top_k": 0,
         "reasoning_effort": 75,  # low=25, high=50, xhigh=75, max=100; accepts 1..100.
     },
@@ -170,14 +172,81 @@ Inspect each new image before continuing, using its view label and any legend to
 Images describe the viewpoint when obtained. Point-cloud gaps may be reconstruction artifacts.
 State uncertainty when the visual evidence is insufficient, and answer once you have enough evidence."""
 
-PROMPT = """Navigate from the initial view to the location and viewing direction shown in the goal view.
-The camera starts at the recorded pose of the initial view. The goal view is a reference, not a current observation.
-Use the camera tools to inspect the current rendered scene and navigate toward the goal.
-Match both the viewpoint and viewing direction, rather than merely finding the same object.
-The reference images are video frames; rendered observations may contain point-cloud gaps and a different image crop.
-When you believe you have reached the goal viewpoint, report success with visual evidence.
+PROMPT = """Navigate from the initial view to the goal.
+Goal type: {goal_type}.
+The initial view is a reference first-person video frame. The camera starts at its recorded pose.
+The goal image is a reference, not a current observation.
+{goal_instruction}
+Use the camera tools to inspect the current rendered first-person scene and navigate toward the goal.
+Rendered observations may contain point-cloud gaps and a different image crop from the reference video.
+When you believe you have reached the goal, report success with visual evidence.
 If you cannot reach it, report failure with a reason.
 If finish_task is available, use it to report the outcome and end the task; otherwise respond in text."""
+GOAL_PROMPTS = {
+    'first_person': """The goal image is a reference first-person video frame.
+Match both the camera location and the full viewing direction shown in that image.
+Finding the same object alone does not establish that the camera viewpoint matches.""",
+    'top_down': """The goal image is a static top-down map.
+The green Start marker and arrow show your initial position and horizontal heading.
+The orange Target marker and arrow show the goal position and required horizontal heading.
+Reach the target position and match the target arrow's horizontal heading.
+The map remains fixed while you move. Use new first-person observations to track your progress.
+Pitch and roll are not evaluated for this goal type.""",
+}
+
+
+def select_navigation_tasks(tasks, mode):
+    """Filter one modality or return both variants consecutively for every pair."""
+    if mode not in {'first_person', 'top_down', 'both'}:
+        raise ValueError('GOAL_MODE must be first_person, top_down, or both')
+    pairs = {}
+    for task in tasks:
+        kind = task.get('goal_type', 'first_person')
+        if kind not in {'first_person', 'top_down'}:
+            raise ValueError(f'Unsupported goal_type: {kind!r}')
+        key = task['scene'], task.get('pair_id', task['id'])
+        variants = pairs.setdefault(key, {})
+        if kind in variants:
+            raise ValueError(f'Duplicate {kind} task for pair {key}')
+        variants[kind] = task
+    if mode == 'both':
+        for key, variants in pairs.items():
+            if set(variants) != {'first_person', 'top_down'}:
+                raise ValueError(f'Both goal variants are required for pair {key}')
+            a, b = variants['first_person'], variants['top_down']
+            if any(a[field] != b[field] for field in ['initial_view', 'target_view']):
+                raise ValueError(f'Sibling endpoints differ: {key}')
+        selected = [variants[kind] for variants in pairs.values() for kind in ['first_person', 'top_down']]
+    else:
+        selected = [task for task in tasks if task.get('goal_type', 'first_person') == mode]
+    if not selected:
+        raise ValueError(f'No tasks available for GOAL_MODE={mode!r}')
+    return selected
+
+
+def navigation_goal(task, data_root, target_path):
+    goal_type = task.get('goal_type', 'first_person')
+    metrics = {'first_person': 'forward_angle', 'top_down': 'horizontal_heading'}
+    if goal_type not in metrics:
+        raise ValueError(f'Unsupported goal_type: {goal_type!r}')
+    metric = metrics[goal_type]
+    if task.get('direction_metric', metric) != metric:
+        raise ValueError(f'Inconsistent direction_metric for {goal_type}')
+    metadata = {'goal_type': goal_type, 'direction_metric': metric,
+                'pair_id': task.get('pair_id', task.get('id'))}
+    path = Path(target_path).resolve()
+    if goal_type == 'top_down':
+        if not task.get('goal_image'):
+            raise ValueError('A top_down goal requires goal_image')
+        path = Path(task['goal_image']).expanduser()
+        path = (Path(data_root).expanduser() / path).resolve()
+        up = np.asarray(task.get('scene_up'), dtype=float)
+        if up.shape != (3,) or not np.isfinite(up).all() or np.linalg.norm(up) < 1e-6:
+            raise ValueError('A top_down goal requires a finite, nonzero scene_up vector')
+        metadata['scene_up'] = (up / np.linalg.norm(up)).tolist()
+    if not path.is_file():
+        raise FileNotFoundError(path)
+    return path, metadata
 
 
 def write_json(path, value):
@@ -201,6 +270,8 @@ def load_benchmark():
         for field in ('id', 'scene', 'initial_view', 'target_view'):
             if not isinstance(task.get(field), str) or not task[field]:
                 raise ValueError(f'Each benchmark task needs a non-empty {field}')
+        if task.get('goal_type', 'first_person') not in GOAL_PROMPTS:
+            raise ValueError(f'Unsupported goal_type: {task.get("goal_type")!r}')
         scene = Path(task['scene'])
         if scene.is_absolute() or len(scene.parts) != 2 or '..' in scene.parts:
             raise ValueError(f'Expected a source/scene path: {task["scene"]}')
@@ -209,7 +280,7 @@ def load_benchmark():
         if task_key(task) in keys:
             raise ValueError(f'Duplicate benchmark task: {task_key(task)}')
         keys.add(task_key(task))
-    return tasks
+    return select_navigation_tasks(tasks, GOAL_MODE)
 
 
 def reference_frame(scene_dir, image, cameras):
@@ -245,27 +316,36 @@ def run_task(task, output, backend, protocol):
     agent = None
     result = None
     target_camera = None
+    goal_metadata = {'goal_type': task.get('goal_type', 'first_person'),
+                     'pair_id': task.get('pair_id', task['id'])}
     try:
         scene_dir = (Path(DATA_ROOT).expanduser() / task['scene']).resolve()
         task_data = {
-            'benchmark_task': task, 'scene_dir': str(scene_dir), 'prompt': PROMPT,
+            'benchmark_task': task, 'scene_dir': str(scene_dir),
+            'prompt': PROMPT.format(goal_type=goal_metadata['goal_type'],
+                                    goal_instruction=GOAL_PROMPTS[goal_metadata['goal_type']]),
             'model': MODEL, 'model_config': model_config_snapshot(MODEL_GENERATION_CONFIGS[MODEL]),
             'agent_config': AGENT_CONFIG, 'tool_config': TOOL_CONFIG,
         }
         write_json(output / 'task.json', task_data)
         cameras = json.loads((scene_dir / 'cameras.json').read_text())
         initial_path, initial_camera = reference_frame(scene_dir, task['initial_view'], cameras)
-        goal_path, goal_camera = reference_frame(scene_dir, task['target_view'], cameras)
-        target_camera = reference_camera_state(goal_camera, goal_path)
+        target_path, goal_camera = reference_frame(scene_dir, task['target_view'], cameras)
+        target_camera = reference_camera_state(goal_camera, target_path)
+        goal_path, goal_metadata = navigation_goal(task, DATA_ROOT, target_path)
         config = {**SCENE_CONFIG, 'scene_dir': str(scene_dir),
                   'initial_camera': initial_camera, 'target_camera': goal_camera}
         initial_copy = output / f'initial_view{initial_path.suffix.lower()}'
-        goal_copy = output / f'target_view{goal_path.suffix.lower()}'
+        target_copy = output / f'target_view{target_path.suffix.lower()}'
+        goal_copy = target_copy if goal_metadata['goal_type'] == 'first_person' else output / f'goal_image{goal_path.suffix.lower()}'
         shutil.copy2(initial_path, initial_copy)
-        shutil.copy2(goal_path, goal_copy)
-        target_camera['image'] = str(goal_copy)
+        shutil.copy2(target_path, target_copy)
+        if goal_copy != target_copy:
+            shutil.copy2(goal_path, goal_copy)
+        target_camera['image'] = str(target_copy)
         write_json(output / 'task.json', {
-            **task_data, 'initial_view': str(initial_copy), 'goal_view': str(goal_copy),
+            **task_data, **goal_metadata, 'initial_view': str(initial_copy),
+            'goal_view': str(goal_copy), 'goal_image': str(goal_copy), 'target_view': str(target_copy),
             'initial_camera': initial_camera, 'goal_camera': goal_camera,
         })
         content = [
@@ -273,7 +353,7 @@ def run_task(task, output, backend, protocol):
             {'type': 'image_url', 'image_url': {'url': str(initial_copy)}},
             {'type': 'text', 'text': '</initial_view>\n<goal_view>'},
             {'type': 'image_url', 'image_url': {'url': str(goal_copy)}},
-            {'type': 'text', 'text': f'</goal_view>\n{PROMPT}'},
+            {'type': 'text', 'text': f'</goal_view>\n{task_data["prompt"]}'},
         ]
         with CameraClient(config['blender'], config, output, timeout=config['timeout']) as camera:
             camera.observe()
@@ -294,7 +374,7 @@ def run_task(task, output, backend, protocol):
         }
     finally:
         if result is not None:
-            result = {**result, 'id': task['id'], 'scene': task['scene'], 'model': MODEL,
+            result = {**result, **goal_metadata, 'id': task['id'], 'scene': task['scene'], 'model': MODEL,
                       'output_dir': str(output), 'elapsed_seconds': round(time.perf_counter() - started, 3),
                       'target_camera': target_camera}
             try:
@@ -308,14 +388,22 @@ def run_task(task, output, backend, protocol):
 
 def checkpoint(output, tasks, records):
     ordered = [records[task_key(task)] for task in tasks if task_key(task) in records]
-    finished = [record for record in ordered if record['termination'] != 'interrupted']
-    successes = sum(record['status'] == 'success' for record in finished)
+    def counts(selected):
+        items = [records[task_key(task)] for task in selected if task_key(task) in records]
+        finished = [record for record in items if record['termination'] != 'interrupted']
+        successes = sum(record['status'] == 'success' for record in finished)
+        return {
+            'total': len(selected), 'finished': len(finished),
+            'pending': len(selected) - len(finished), 'complete': len(finished) == len(selected),
+            'status_counts': dict(Counter(record['status'] or 'unreported' for record in finished)),
+            'termination_counts': dict(Counter(record['termination'] for record in items)),
+            'self_reported_success_rate': successes / len(finished) if finished else None,
+        }
     summary = {
-        'model': MODEL, 'total': len(tasks), 'finished': len(finished),
-        'pending': len(tasks) - len(finished), 'complete': len(finished) == len(tasks),
-        'status_counts': dict(Counter(record['status'] or 'unreported' for record in finished)),
-        'termination_counts': dict(Counter(record['termination'] for record in ordered)),
-        'self_reported_success_rate': successes / len(finished) if finished else None,
+        'model': MODEL, 'goal_mode': GOAL_MODE, **counts(tasks),
+        'by_goal_type': {kind: counts([task for task in tasks if task.get('goal_type', 'first_person') == kind])
+                         for kind in ['first_person', 'top_down']
+                         if any(task.get('goal_type', 'first_person') == kind for task in tasks)},
     }
     write_json(output / 'results.json', ordered)
     write_json(output / 'summary.json', summary)
@@ -325,28 +413,33 @@ def checkpoint(output, tasks, records):
 def main():
     tasks = load_benchmark()
     settings = {
-        'model': MODEL, 'model_config': model_config_snapshot(MODEL_GENERATION_CONFIGS[MODEL]),
+        'model': MODEL, 'goal_mode': GOAL_MODE,
+        'model_config': model_config_snapshot(MODEL_GENERATION_CONFIGS[MODEL]),
         'data_root': str(Path(DATA_ROOT).expanduser().resolve()),
         'scene_config': SCENE_CONFIG, 'agent_config': AGENT_CONFIG, 'tool_config': TOOL_CONFIG,
-        'system_prompt': SYSTEM_PROMPT, 'prompt': PROMPT,
+        'system_prompt': SYSTEM_PROMPT, 'prompt': PROMPT, 'goal_prompts': GOAL_PROMPTS,
     }
     settings = json.loads(json.dumps(settings, allow_nan=False))
     records = {}
     if RESUME_DIR is None:
-        output = Path(OUTPUT_DIR).expanduser().resolve() / f'nav_batch_{MODEL}_{datetime.now():%Y%m%d_%H%M%S_%f}'
+        output = Path(OUTPUT_DIR).expanduser().resolve() / f'nav_batch_{MODEL}_{GOAL_MODE}_{datetime.now():%Y%m%d_%H%M%S_%f}'
         output.mkdir(parents=True, exist_ok=False)
         write_json(output / 'run.json', {'benchmark': str(Path(BENCHMARK_JSON).resolve()), 'settings': settings})
         write_json(output / 'benchmark.json', tasks)
     else:
         output = Path(RESUME_DIR).expanduser().resolve()
         saved_settings = json.loads((output / 'run.json').read_text())['settings']
+        saved_tasks = json.loads((output / 'benchmark.json').read_text())
+        if 'goal_mode' not in saved_settings:
+            kinds = {task.get('goal_type', 'first_person') for task in saved_tasks}
+            saved_settings['goal_mode'] = next(iter(kinds)) if len(kinds) == 1 else 'both'
         if 'server_config' in saved_settings:  # Accept snapshots from before per-model server settings.
             backend_name = MODEL_ADAPTERS[saved_settings['model']]['backend']
             saved_settings['model_config'] = {**saved_settings['model_config'],
                                              'server_config': saved_settings.pop('server_config')[backend_name]}
         if saved_settings != settings:
             raise ValueError('Resume settings differ from run.json; restore the original configuration')
-        if json.loads((output / 'benchmark.json').read_text()) != tasks:
+        if saved_tasks != tasks:
             raise ValueError('Benchmark differs from the saved benchmark.json')
         keys = {task_key(task) for task in tasks}
         # Recover even if a process stopped after saving a task but before checkpointing.
@@ -357,7 +450,8 @@ def main():
                 if 'target_camera' not in record:
                     task_data = json.loads((path.parent / 'task.json').read_text())
                     goal = task_data.get('goal_camera')
-                    record['target_camera'] = reference_camera_state(goal, task_data['goal_view']) if goal else None
+                    target_image = task_data.get('target_view', task_data['goal_view'])
+                    record['target_camera'] = reference_camera_state(goal, target_image) if goal else None
                     write_json(path, record)
                 records[task_key(record)] = record
     summary = checkpoint(output, tasks, records)

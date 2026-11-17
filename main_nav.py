@@ -2,9 +2,9 @@
 
 from datetime import datetime
 import json
-import os
 from pathlib import Path
 import shutil
+import sys
 import random
 import numpy as np
 
@@ -13,6 +13,10 @@ from agent.models import create_model, model_config_snapshot
 from agent.tools import create_tools
 from scene.client import CameraClient, reference_camera_state
 
+DATA_ROOT = Path('/data4/haibo/data/3D_Env')
+BENCHMARK_JSON = Path(__file__).resolve().parent / 'outputs' / 'sub_benchmark_test.json'
+GOAL_MODE = 'both'  # 'first_person', 'top_down', or 'both'.
+OUTPUT_DIR = str(Path(__file__).resolve().parent / "outputs")
 
 MODEL = "qwen3.8-flash-next"
 
@@ -36,7 +40,7 @@ MODEL_GENERATION_CONFIGS = {
         },
         "max_tokens": 16 * 1024,
         "temperature": 1.0,
-        "top_p": 0.95,
+        "top_p": 1.0,
         "top_k": 0,
         "reasoning_effort": 75,  # low=25, high=50, xhigh=75, max=100; accepts 1..100.
     },
@@ -107,7 +111,6 @@ MODEL_GENERATION_CONFIGS = {
 }
 
 
-OUTPUT_DIR = str(Path(__file__).resolve().parent / "outputs")
 
 SYSTEM_PROMPT = """You are a spatial agent exploring a reconstructed 3D point-cloud scene.
 Use the available tools to gather evidence and complete the user's task.
@@ -117,7 +120,61 @@ Inspect each new image before continuing, using its view label and any legend to
 Images describe the viewpoint when obtained. Point-cloud gaps may be reconstruction artifacts.
 State uncertainty when the visual evidence is insufficient, and answer once you have enough evidence."""
 
-BENCHMARK_JSON = Path(__file__).resolve().parent / 'outputs' / 'benchmark_test.json'
+
+
+
+def select_navigation_tasks(tasks, mode):
+    """Filter one modality or return both variants consecutively for every pair."""
+    if mode not in {'first_person', 'top_down', 'both'}:
+        raise ValueError('GOAL_MODE must be first_person, top_down, or both')
+    pairs = {}
+    for task in tasks:
+        kind = task.get('goal_type', 'first_person')
+        if kind not in {'first_person', 'top_down'}:
+            raise ValueError(f'Unsupported goal_type: {kind!r}')
+        key = task['scene'], task.get('pair_id', task['id'])
+        variants = pairs.setdefault(key, {})
+        if kind in variants:
+            raise ValueError(f'Duplicate {kind} task for pair {key}')
+        variants[kind] = task
+    if mode == 'both':
+        for key, variants in pairs.items():
+            if set(variants) != {'first_person', 'top_down'}:
+                raise ValueError(f'Both goal variants are required for pair {key}')
+            a, b = variants['first_person'], variants['top_down']
+            if any(a[field] != b[field] for field in ['initial_view', 'target_view']):
+                raise ValueError(f'Sibling endpoints differ: {key}')
+        selected = [variants[kind] for variants in pairs.values() for kind in ['first_person', 'top_down']]
+    else:
+        selected = [task for task in tasks if task.get('goal_type', 'first_person') == mode]
+    if not selected:
+        raise ValueError(f'No tasks available for GOAL_MODE={mode!r}')
+    return selected
+
+
+def navigation_goal(task, data_root, target_path):
+    goal_type = task.get('goal_type', 'first_person')
+    metrics = {'first_person': 'forward_angle', 'top_down': 'horizontal_heading'}
+    if goal_type not in metrics:
+        raise ValueError(f'Unsupported goal_type: {goal_type!r}')
+    metric = metrics[goal_type]
+    if task.get('direction_metric', metric) != metric:
+        raise ValueError(f'Inconsistent direction_metric for {goal_type}')
+    metadata = {'goal_type': goal_type, 'direction_metric': metric,
+                'pair_id': task.get('pair_id', task.get('id'))}
+    path = Path(target_path).resolve()
+    if goal_type == 'top_down':
+        if not task.get('goal_image'):
+            raise ValueError('A top_down goal requires goal_image')
+        path = Path(task['goal_image']).expanduser()
+        path = (Path(data_root).expanduser() / path).resolve()
+        up = np.asarray(task.get('scene_up'), dtype=float)
+        if up.shape != (3,) or not np.isfinite(up).all() or np.linalg.norm(up) < 1e-6:
+            raise ValueError('A top_down goal requires a finite, nonzero scene_up vector')
+        metadata['scene_up'] = (up / np.linalg.norm(up)).tolist()
+    if not path.is_file():
+        raise FileNotFoundError(path)
+    return path, metadata
 
 
 def init_seeds(seed=42,):
@@ -129,15 +186,19 @@ def load_json(path):
         data = json.load(f)
     return data
 
-test_data = load_json(BENCHMARK_JSON)
+test_data = select_navigation_tasks(load_json(BENCHMARK_JSON), GOAL_MODE)
 
 init_seeds(42)
-sample = random.choice(test_data)
+pool = [task for task in test_data if task.get('goal_type', 'first_person') == 'first_person'] if GOAL_MODE == 'both' else test_data
+sample = random.choice(pool)
+samples = ([task for task in test_data
+            if (task['scene'], task.get('pair_id', task['id'])) ==
+               (sample['scene'], sample.get('pair_id', sample['id']))]
+           if GOAL_MODE == 'both' else [sample])
 print(sample)
 
 
 SCENE_CONFIG = {
-    "scene_dir": os.path.join('/data4/haibo/data/3D_Env', sample['scene']),
     "blender": "/data4/haibo/software/blender/blender-4.5.13-linux-x64/blender",
     "timeout": 300,
     "resolution": 960,
@@ -159,17 +220,27 @@ SCENE_CONFIG = {
     "look_step": 15,
     "up": None,  # Scene up for ground movement, yaw, and the map; None estimates it from the scene.
 }
-# Example frames. Paths may be absolute or relative to scene_dir.
-INITIAL_VIEW = sample['initial_view']
-GOAL_VIEW = sample['target_view']
-PROMPT = """Navigate from the initial view to the location and viewing direction shown in the goal view.
-The camera starts at the recorded pose of the initial view. The goal view is a reference, not a current observation.
-Use the camera tools to inspect the current rendered scene and navigate toward the goal.
-Match both the viewpoint and viewing direction, rather than merely finding the same object.
-The reference images are video frames; rendered observations may contain point-cloud gaps and a different image crop.
-When you believe you have reached the goal viewpoint, report success with visual evidence.
+PROMPT = """Navigate from the initial view to the goal.
+Goal type: {goal_type}.
+The initial view is a reference first-person video frame. The camera starts at its recorded pose.
+The goal image is a reference, not a current observation.
+{goal_instruction}
+Use the camera tools to inspect the current rendered first-person scene and navigate toward the goal.
+Rendered observations may contain point-cloud gaps and a different image crop from the reference video.
+When you believe you have reached the goal, report success with visual evidence.
 If you cannot reach it, report failure with a reason.
 If finish_task is available, use it to report the outcome and end the task; otherwise respond in text."""
+GOAL_PROMPTS = {
+    'first_person': """The goal image is a reference first-person video frame.
+Match both the camera location and the full viewing direction shown in that image.
+Finding the same object alone does not establish that the camera viewpoint matches.""",
+    'top_down': """The goal image is a static top-down map.
+The green Start marker and arrow show your initial position and horizontal heading.
+The orange Target marker and arrow show the goal position and required horizontal heading.
+Reach the target position and match the target arrow's horizontal heading.
+The map remains fixed while you move. Use new first-person observations to track your progress.
+Pitch and roll are not evaluated for this goal type.""",
+}
 AGENT_CONFIG = {
     "max_steps": 50,
     "max_conversation_images": 7,
@@ -228,31 +299,38 @@ def final_camera_state(output):
     )}
 
 
-def main():
-    scene_dir = Path(SCENE_CONFIG['scene_dir']).expanduser().resolve()
+def run_task(task):
+    scene_dir = (Path(DATA_ROOT).expanduser() / task['scene']).resolve()
     cameras = json.loads((scene_dir / 'cameras.json').read_text())
-    initial_path, initial_camera = reference_frame(scene_dir, INITIAL_VIEW, cameras)
-    goal_path, goal_camera = reference_frame(scene_dir, GOAL_VIEW, cameras)
+    initial_path, initial_camera = reference_frame(scene_dir, task['initial_view'], cameras)
+    target_path, goal_camera = reference_frame(scene_dir, task['target_view'], cameras)
+    goal_path, goal_metadata = navigation_goal(task, DATA_ROOT, target_path)
+    goal_type = goal_metadata['goal_type']
+    prompt = PROMPT.format(goal_type=goal_type, goal_instruction=GOAL_PROMPTS[goal_type])
     config = {**SCENE_CONFIG, 'scene_dir': str(scene_dir),
               'initial_camera': initial_camera, 'target_camera': goal_camera}
     output = (Path(OUTPUT_DIR).expanduser().resolve()
-              / f'nav_{scene_dir.name}_{MODEL}_{datetime.now():%Y%m%d_%H%M%S_%f}')
+              / f'nav_{scene_dir.name}_{MODEL}_{goal_type}_{datetime.now():%Y%m%d_%H%M%S_%f}')
     output.mkdir(parents=True, exist_ok=False)
     initial_copy = output / f'initial_view{initial_path.suffix.lower()}'
-    goal_copy = output / f'target_view{goal_path.suffix.lower()}'
+    target_copy = output / f'target_view{target_path.suffix.lower()}'
+    goal_copy = target_copy if goal_type == 'first_person' else output / f'goal_image{goal_path.suffix.lower()}'
     shutil.copy2(initial_path, initial_copy)
-    shutil.copy2(goal_path, goal_copy)
+    shutil.copy2(target_path, target_copy)
+    if goal_copy != target_copy:
+        shutil.copy2(goal_path, goal_copy)
     content = [
         {'type': 'text', 'text': '<initial_view>'},
         image_content(initial_copy),
         {'type': 'text', 'text': '</initial_view>\n<goal_view>'},
         image_content(goal_copy),
-        {'type': 'text', 'text': f'</goal_view>\n{PROMPT}'},
+        {'type': 'text', 'text': f'</goal_view>\n{prompt}'},
     ]
     # Camera parameters are local metadata; the model receives images and task text only.
     (output / 'task.json').write_text(json.dumps({
-        'scene_dir': str(scene_dir), 'initial_view': str(initial_copy), 'goal_view': str(goal_copy),
-        'prompt': PROMPT, 'initial_camera': initial_camera, 'goal_camera': goal_camera,
+        **goal_metadata, 'benchmark_task': task, 'scene_dir': str(scene_dir), 'initial_view': str(initial_copy),
+        'goal_view': str(goal_copy), 'goal_image': str(goal_copy), 'target_view': str(target_copy),
+        'prompt': prompt, 'initial_camera': initial_camera, 'goal_camera': goal_camera,
         'tool_config': TOOL_CONFIG,
         'model': MODEL, 'model_config': model_config_snapshot(MODEL_GENERATION_CONFIGS[MODEL]),
         'agent_config': AGENT_CONFIG,
@@ -264,7 +342,7 @@ def main():
     result = None
     target_camera = None
     try:
-        target_camera = reference_camera_state(goal_camera, goal_copy)
+        target_camera = reference_camera_state(goal_camera, target_copy)
         backend, protocol = create_model(MODEL, model_config)
         with CameraClient(config['blender'], config, output, timeout=config['timeout']) as camera:
             camera.observe()  # Record the actual starting pose and its local trajectory map.
@@ -288,7 +366,8 @@ def main():
         try:
             result = result or (agent.result if agent is not None else None)
             if result is not None:
-                result = {**result, 'final_camera': final_camera_state(output), 'target_camera': target_camera}
+                result = {**result, **goal_metadata,
+                          'final_camera': final_camera_state(output), 'target_camera': target_camera}
                 temporary = output / 'result.json.tmp'
                 temporary.write_text(json.dumps(result, ensure_ascii=False, indent=2) + '\n')
                 temporary.replace(output / 'result.json')
@@ -296,6 +375,19 @@ def main():
             if backend is not None:
                 backend.client.close()
     return 0
+
+
+def main():
+    exit_code = 0
+    for task in samples:
+        try:
+            run_task(task)
+        except Exception as error:
+            if len(samples) == 1:
+                raise
+            print(f'Navigation failed for {task["id"]}: {error}', file=sys.stderr, flush=True)
+            exit_code = 1
+    return exit_code
 
 
 if __name__ == '__main__':
