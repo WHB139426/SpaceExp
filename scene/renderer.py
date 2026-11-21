@@ -12,6 +12,10 @@ from .boundary import height_block_reason, movement_block_reason
 from .trajectory import TrajectoryMap
 
 
+MOVE_ACTIONS = {'move_forward', 'move_backward', 'move_left', 'move_right', 'move_up', 'move_down'}
+TURN_ACTIONS = {'turn_left', 'turn_right', 'turn_up', 'turn_down'}
+
+
 def emission_material(name, color, strength=1):
     import bpy
 
@@ -324,7 +328,8 @@ class SceneRenderer:
         self.index = 0
         self.observations = []
 
-    def observe(self, command='observe', magnitude=None, applied_magnitude=None, blocked=False, reason=None):
+    def observe(self, command='observe', magnitude=None, applied_magnitude=None, blocked=False, reason=None,
+                *, action_results=None, action_positions=None):
         index = self.index + 1
         label = command if magnitude is None else f'{command}_{str(magnitude).removesuffix(".0")}'
         if blocked:
@@ -344,6 +349,8 @@ class SceneRenderer:
             }
             if magnitude is not None:
                 record.update(magnitude=magnitude, applied_magnitude=applied_magnitude, blocked=blocked, reason=reason)
+            if action_results is not None:
+                record['actions'] = action_results
             observation = {
                 **record, 'command': command,
                 'magnitude': magnitude, 'applied_magnitude': applied_magnitude,
@@ -353,12 +360,17 @@ class SceneRenderer:
                 'forward': list(self.camera.rotation_quaternion @ Vector((0, 0, -1))),
                 'heading': list(self.heading),
                 'up': list(self.camera.rotation_quaternion @ Vector((0, 1, 0))),
-                'top_down_image': str(top_down),
             }
+            if self.config.get('render_top_down', True):
+                observation['top_down_image'] = str(top_down)
+            if action_positions is not None:
+                observation['action_positions'] = action_positions
             observations = [*self.observations, observation]
-            frame = self.trajectory_map.render(self.output, observations)
+            map_metadata = {}
+            if 'top_down_image' in observation:
+                map_metadata['top_down_frame'] = self.trajectory_map.render(self.output, observations)
             metadata.write_text(json.dumps({
-                **observation, 'intrinsics': self.intrinsics, 'top_down_frame': frame,
+                **observation, 'intrinsics': self.intrinsics, **map_metadata,
                 'height_limits': {'min': self.min_camera_height, 'max': self.max_camera_height,
                                   'floor': list(self.floor), 'up': list(self.up),
                                   'enforced': bool(self.config.get('boundary_enforced', True))},
@@ -388,14 +400,52 @@ class SceneRenderer:
             raise
 
     def action(self, key, magnitude=None):
-        moves = {'move_forward', 'move_backward', 'move_left', 'move_right', 'move_up', 'move_down'}
-        if key not in moves | {'turn_left', 'turn_right', 'turn_up', 'turn_down'}:
+        magnitude = self._action_magnitude(key, magnitude)
+        return self._run_actions([(key, magnitude)], batched=False)
+
+    def actions(self, actions):
+        if not isinstance(actions, list) or not actions:
+            raise ValueError('actions must be a non-empty list of camera actions')
+        commands = []
+        for action in actions:
+            if not isinstance(action, dict) or 'key' not in action or action.keys() - {'key', 'magnitude'}:
+                raise ValueError('Each action must be an object with a key and optional magnitude')
+            key = action['key']
+            commands.append((key, self._action_magnitude(key, action.get('magnitude'))))
+        return self._run_actions(commands, batched=True)
+
+    def _action_magnitude(self, key, magnitude):
+        if not isinstance(key, str) or key not in MOVE_ACTIONS | TURN_ACTIONS:
             raise ValueError('Allowed actions: move_forward, move_backward, move_left, move_right, move_up, move_down, '
                              'turn_left, turn_right, turn_up, turn_down')
         if magnitude is None:
-            magnitude = self.config['move_step' if key in moves else 'look_step']
+            magnitude = self.config['move_step' if key in MOVE_ACTIONS else 'look_step']
         if type(magnitude) not in (int, float) or not math.isfinite(magnitude) or magnitude <= 0:
             raise ValueError('Magnitude must be a positive finite number')
+        return magnitude
+
+    def _run_actions(self, commands, *, batched):
+        position = self.camera.location.copy()
+        rotation = self.camera.rotation_quaternion.copy()
+        heading = self.heading.copy()
+        try:
+            if not batched:
+                key, magnitude = commands[0]
+                return self.observe(key, magnitude, **self._apply_action(key, magnitude))
+
+            positions = [list(position)]
+            results = []
+            for key, magnitude in commands:
+                result = self._apply_action(key, magnitude)
+                results.append({'key': key, 'magnitude': magnitude, **result})
+                positions.append(list(self.camera.location))
+            return self.observe('actions', action_results=results, action_positions=positions)
+        except BaseException:
+            self._apply_pose(position, rotation)
+            self.heading = heading
+            raise
+
+    def _apply_action(self, key, magnitude):
         position = self.camera.location.copy()
         rotation = self.camera.rotation_quaternion.copy()
         heading = self.heading.copy()
@@ -403,7 +453,7 @@ class SceneRenderer:
         next_heading = heading.copy()
         applied_magnitude = magnitude
         reason = None
-        if key in moves:
+        if key in MOVE_ACTIONS:
             right = heading.cross(self.up).normalized()
             direction = {'move_forward': heading, 'move_backward': -heading,
                          'move_left': -right, 'move_right': right,
@@ -438,9 +488,4 @@ class SceneRenderer:
         if reason is None:
             self._apply_pose(next_position, next_rotation)
             self.heading = next_heading
-        try:
-            return self.observe(key, magnitude, applied_magnitude, blocked=reason is not None, reason=reason)
-        except BaseException:
-            self._apply_pose(position, rotation)
-            self.heading = heading
-            raise
+        return {'applied_magnitude': applied_magnitude, 'blocked': reason is not None, 'reason': reason}

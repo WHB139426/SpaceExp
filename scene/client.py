@@ -35,6 +35,7 @@ class CameraClient:
         output.mkdir(parents=True, exist_ok=True)
         self.log_path = output / 'render.log'
         self.timeout = timeout
+        self.render_top_down = config.get('render_top_down', True)
         self.latest_observation = None
         options = json.dumps({'config': config, 'output': str(output)}, allow_nan=False)
         read_fd, write_fd = os.pipe()
@@ -90,10 +91,15 @@ class CameraClient:
     def action(self, key, magnitude=None):
         return self._observation('action', key=key, magnitude=magnitude)
 
+    def actions(self, actions):
+        return self._observation('actions', actions=actions)
+
     def reset(self):
         return self._observation('reset')
 
     def top_down(self):
+        if not self.render_top_down:
+            raise RuntimeError('Top-down rendering is disabled for this scene.')
         if self.latest_observation is None:
             raise RuntimeError('No observation is available yet; call camera_observe first.')
         record = self.latest_observation
@@ -109,6 +115,8 @@ class CameraClient:
     def _observation(self, operation, **params):
         record = self._request(operation, **params)
         self.latest_observation = record
+        if not self.render_top_down:
+            return record
         try:
             metadata = json.loads(Path(record['image']).with_suffix('.json').read_text())
             observations = json.loads((Path(record['image']).parent / 'trajectory.json').read_text())

@@ -3,6 +3,18 @@
 from pathlib import Path
 
 
+def trajectory_points(observations):
+    """Yield position, observation ID and continuity, including moves between renders."""
+    for index, observation in enumerate(observations):
+        step = observation['observation_id']
+        positions = observation.get('action_positions')
+        if positions:
+            for position in positions[1:] if index else positions:
+                yield position, step, True
+        else:
+            yield observation['position'], step, observation.get('command') != 'reset'
+
+
 class TrajectoryMap:
     """Render an opaque, roof-clipped background; reuse it while bounds stay fixed."""
 
@@ -68,9 +80,8 @@ class TrajectoryMap:
         from mathutils import Vector
 
         renderer, scene = self.renderer, self.renderer.scene
-        xy = np.array([((Vector(record['position']) - self.origin).dot(self.right),
-                        (Vector(record['position']) - self.origin).dot(self.ahead))
-                       for record in observations])
+        offsets = [Vector(position) - self.origin for position, _, _ in trajectory_points(observations)]
+        xy = np.array([(offset.dot(self.right), offset.dot(self.ahead)) for offset in offsets])
         low, high = np.minimum(self.low, xy.min(axis=0)), np.maximum(self.high, xy.max(axis=0))
         margin = max(float((high - low).max()) * .05, .2)
         middle = (low + high) / 2
@@ -146,12 +157,13 @@ def draw_trajectory(frame, observations, output):
 
     output = Path(output)
     basis = np.column_stack((frame['right'], frame['ahead']))
-    positions = np.array([record['position'] for record in observations])
+    path = list(trajectory_points(observations))
+    positions = np.array([position for position, _, _ in path])
     xy = (positions - frame['origin']) @ basis
     directions = np.array([record['heading'] for record in observations]) @ basis
     lengths = np.linalg.norm(directions, axis=1)
     usable = lengths > 1e-6
-    steps = np.array([record['observation_id'] for record in observations])
+    steps = np.array([step for _, step, _ in path])
     fig, ax = plt.subplots(figsize=(11, 10), constrained_layout=True)
     temporary = output.with_suffix('.tmp.png')
     latest = output.parent / 'top_down.png'
@@ -177,7 +189,7 @@ def draw_trajectory(frame, observations, output):
                     ax.text(.02, .02, message, transform=ax.transAxes, color='#c02020', zorder=10,
                             bbox={'facecolor': 'white', 'alpha': .9, 'edgecolor': 'none'})
         # Resets teleport to the start; never draw their jumps as traveled paths.
-        connected = np.array([record.get('command') != 'reset' for record in observations[1:]], dtype=bool)
+        connected = np.array([connected for _, _, connected in path[1:]], dtype=bool)
         segments = np.stack((xy[:-1], xy[1:]), axis=1)[connected]
         ax.add_collection(LineCollection(segments, colors='white', linewidths=5, zorder=3))
         colors = matplotlib.colors.LinearSegmentedColormap.from_list(
@@ -188,7 +200,7 @@ def draw_trajectory(frame, observations, output):
         ax.add_collection(line)
         ax.scatter(*xy[0], s=115, c='#20c56b', edgecolors='black',
                    linewidths=1.2, zorder=7, label='Start')
-        if usable[0]:
+        if usable[0] and not observations[0].get('action_positions'):
             heading = directions[0] / lengths[0] * frame['arrow_length']
             ax.quiver(*xy[0], *heading, angles='xy', scale_units='xy', scale=1,
                       color='#20c56b', edgecolors='white', linewidths=.5, width=.007, zorder=8)

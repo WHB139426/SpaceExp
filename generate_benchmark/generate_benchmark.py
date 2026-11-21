@@ -10,14 +10,16 @@ import sys
 
 import numpy as np
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+PROJECT_DIR = Path(__file__).resolve().parents[1]
+if not __package__:
+    sys.path.insert(0, str(PROJECT_DIR))
 
 from scene.boundary import build_boundary, movement_block_reason
 
 
 DATA_ROOT = Path('/data4/haibo/data/3D_Env')
 TEST_SPLIT = DATA_ROOT / 'train.json'
-OUTPUT_DIR = Path(__file__).resolve().parent / 'outputs'
+OUTPUT_DIR = PROJECT_DIR / 'outputs'
 OUTPUT_JSON = OUTPUT_DIR / 'benchmark_train.json'
 PREVIEW_DIR = OUTPUT_DIR / 'benchmark_train_previews'
 SEED = 42

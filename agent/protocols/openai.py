@@ -8,16 +8,23 @@ from ..types import Message, ModelInput, ModelOutput
 
 def function_schema(schema):
     """Adapt existing tool schemas to Responses strict mode without changing tools."""
+    def require_properties(definition):
+        if definition.get('type') == 'array':
+            require_properties(definition['items'])
+        if definition.get('type') != 'object':
+            return
+        properties = definition['properties']
+        required = definition.get('required', [])
+        for name, child in properties.items():
+            require_properties(child)
+            if name not in required:
+                # Null preserves the Python default for omitted arguments.
+                properties[name] = {'anyOf': [child, {'type': 'null'}]}
+        definition['required'] = list(properties)
+        definition['additionalProperties'] = False
+
     function = copy.deepcopy(schema['function'])
-    parameters = function['parameters']
-    properties = parameters['properties']
-    required = parameters.get('required', [])
-    for name, definition in properties.items():
-        if name not in required:
-            # Existing camera tools use flat arguments; null retains Python defaults.
-            parameters['properties'][name] = {'anyOf': [definition, {'type': 'null'}]}
-    parameters['required'] = list(properties)
-    parameters['additionalProperties'] = False
+    require_properties(function['parameters'])
     return {'type': 'function', **function, 'strict': True}
 
 

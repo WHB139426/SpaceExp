@@ -24,8 +24,9 @@ def create_tools(camera, *, move_step, look_step, enable_move_backward=True,
                  enable_finish_task=False, enable_move_up=False, enable_move_down=False,
                  enable_observe=True, enable_action=True, enable_move_forward=True,
                  enable_turn_left=True, enable_turn_right=True,
-                 enable_turn_up=True, enable_turn_down=True, enable_reset=False) -> list[Tool]:
-    actions = []
+                 enable_turn_up=True, enable_turn_down=True, enable_reset=False,
+                 enable_actions=False) -> list[Tool]:
+    action_keys = []
     movement_description = ''
     for key, enabled, description in (
         ('move_forward', enable_move_forward, 'move_forward moves along the stored horizontal forward direction. '),
@@ -34,7 +35,7 @@ def create_tools(camera, *, move_step, look_step, enable_move_backward=True,
         ('move_right', enable_move_right, 'move_right strafes horizontally to the right without turning. '),
     ):
         if enabled:
-            actions.append(key)
+            action_keys.append(key)
             movement_description += description
     vertical_description = ''
     for key, enabled, description in (
@@ -42,7 +43,7 @@ def create_tools(camera, *, move_step, look_step, enable_move_backward=True,
         ('move_down', enable_move_down, 'move_down lowers the camera opposite scene up. '),
     ):
         if enabled:
-            actions.append(key)
+            action_keys.append(key)
             vertical_description += description
     if vertical_description:
         vertical_description += (
@@ -61,7 +62,7 @@ def create_tools(camera, *, move_step, look_step, enable_move_backward=True,
          'turn_down adjusts camera pitch downward, preserving position and horizontal forward direction. '),
     ):
         if enabled:
-            actions.append(key)
+            action_keys.append(key)
             turn_description += description
     if enable_turn_up or enable_turn_down:
         turn_description += (
@@ -71,11 +72,38 @@ def create_tools(camera, *, move_step, look_step, enable_move_backward=True,
     def camera_observe():
         return _observation(camera.observe())
 
+    def check_action_key(key):
+        if key not in action_keys:
+            raise ValueError(f'Action disabled or unknown: {key}. Allowed actions: {", ".join(action_keys)}')
+
     def camera_action(key, magnitude=None):
-        if key not in actions:
-            raise ValueError(f'Action disabled or unknown: {key}. Allowed actions: {", ".join(actions)}')
+        check_action_key(key)
         return _observation(camera.action(key, magnitude))
 
+    def camera_actions(actions):
+        if not isinstance(actions, list) or not actions:
+            raise ValueError('actions must be a non-empty list of camera actions')
+        for action in actions:
+            if not isinstance(action, dict) or 'key' not in action:
+                raise ValueError('Each action must be an object with a key and optional magnitude')
+            check_action_key(action['key'])
+        return _observation(camera.actions(actions))
+
+    action_parameters = {
+        'type': 'object',
+        'properties': {
+            'key': {'type': 'string', 'enum': action_keys},
+            'magnitude': {
+                'type': 'number', 'exclusiveMinimum': 0,
+                'description': (
+                    'Distance in meters for any move action (one scene unit equals one meter), '
+                    'or angle in degrees for a turn. '
+                    f'Omit to move {move_step:g} meters or turn {look_step:g} degrees.'
+                ),
+            },
+        },
+        'required': ['key'], 'additionalProperties': False,
+    }
     tools = [
         Tool(
             name='camera_observe',
@@ -111,26 +139,30 @@ def create_tools(camera, *, move_step, look_step, enable_move_backward=True,
                 'Height limits are a configured range, not detected local ceilings; '
                 'furniture and interior obstacles are not collision-tested.'
             ),
-            parameters={
-                'type': 'object',
-                'properties': {
-                    'key': {'type': 'string', 'enum': actions},
-                    'magnitude': {
-                        'type': 'number', 'exclusiveMinimum': 0,
-                        'description': (
-                            'Distance in meters for any move action (one scene unit equals one meter), '
-                            'or angle in degrees for a turn. '
-                            f'Omit to move {move_step:g} meters or turn {look_step:g} degrees.'
-                        ),
-                    },
-                },
-                'required': ['key'], 'additionalProperties': False,
-            },
+            parameters=action_parameters,
             function=camera_action,
         ),
     ]
-    enabled_tools = {'camera_observe': enable_observe, 'camera_action': enable_action and bool(actions)}
+    enabled_tools = {'camera_observe': enable_observe, 'camera_action': enable_action and bool(action_keys)}
     tools = [tool for tool in tools if enabled_tools[tool.name]]
+    if enable_actions and action_keys:
+        tools.append(Tool(
+            name='camera_actions',
+            description=(
+                'Execute an ordered list of camera moves and turns relative to the pose left by the preceding action. '
+                'Returns one first-person image after the entire list and a text status for each action. '
+                'If a move is blocked, the camera stays in place for that move and the list continues. '
+                f'{movement_description}{vertical_description}{turn_description}'
+                'Use a JSON array of action objects. Magnitudes use meters for moves and degrees for turns. '
+                'Omit a magnitude or pass null to use the default for that action.'
+            ),
+            parameters={
+                'type': 'object',
+                'properties': {'actions': {'type': 'array', 'minItems': 1, 'items': action_parameters}},
+                'required': ['actions'], 'additionalProperties': False,
+            },
+            function=camera_actions,
+        ))
     if enable_reset:
         def camera_reset():
             return _observation(camera.reset())

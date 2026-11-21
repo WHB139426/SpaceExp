@@ -57,15 +57,15 @@ outputs/nav_batch_<model>_<goal_mode>_<timestamp>/
 
 每完成一条任务就原子更新结果与汇总；`summary.json` 的 `complete` 表示所有任务都已尝试结束，不代表全部成功。`self_reported_success_rate` 是已结束任务中模型自报成功的比例，尚未加入独立位姿评估；失败包括模型报告的 failure 和步数耗尽，运行异常及没有调用结束工具的回答另行计数。Ctrl+C 保存中断任务与已有进度后退出。将 `RESUME_DIR` 设为对应批次目录可续跑：跳过已有结果的任务（包括失败及 error），重新执行中断或未保存结果的任务，并保留旧尝试目录。续跑会检查任务清单和运行配置一致，还可从每条任务的 `result.json` 重建丢失的批量汇总。首次运行保持 `RESUME_DIR=None`。
 
-运行 `python generate_benchmark.py` 一次完成图片筛选、起终点配对、俯视目标图生成和两种任务合并。配置位于文件顶部；当前配置读取 `train.json`，写入 `outputs/benchmark_train.json`，预览保存到 `outputs/benchmark_train_previews/`。改为测试集时同时设置 `TEST_SPLIT`、`OUTPUT_JSON`、`PREVIEW_DIR`。使用随机种子 42 打乱并遍历所选 split 中全部已重建场景，包括 ARKitScenes、ScanNet 和 ScanNet++，没有场景数量上限。每个场景需有 `cameras.json` 和 `reconstruction.ply`。进度条按已处理场景计数，包括被排除的场景；报告中的 `complete` 表示已遍历全部候选场景。每个场景最多生成 6 组起终点配对（添加俯视兄弟后每组有 2 个任务变体），同一个 initial 最多用于 1 组配对，同一个 target 最多用于 1 组配对；起点和目标分别计算复用次数，同一帧仍可在不同任务中分别充当起点和目标。有效任务不足 6 条时保留已有结果，不因数量不足跳过整个场景；完全没有有效任务的场景仍排除，并在报告中记录原因。按位置、朝向、俯仰和高度分组去重，过滤模糊图像及异常姿态，约束起终点高度差不超过 0.15 米，并尽量平衡近、中、远距离及目标方位。所有任务必须满足原视频的 `initial_frame_index < target_frame_index`，参考路线也只沿视频时间向前。每条参考路线由连续视频位姿投影到起点高度，在该起点对应的外边界网格中逐段检查；不检查家具碰撞，也不将参考路线当作最短路径。生成过程不调用重建或语言模型，使用 Blender 渲染每个场景的俯视图背景。
+运行 `python generate_benchmark/generate_benchmark.py` 一次完成图片筛选、起终点配对、俯视目标图生成和两种任务合并。配置位于文件顶部；当前配置读取 `train.json`，写入 `outputs/benchmark_train.json`，预览保存到 `outputs/benchmark_train_previews/`。改为测试集时同时设置 `TEST_SPLIT`、`OUTPUT_JSON`、`PREVIEW_DIR`。使用随机种子 42 打乱并遍历所选 split 中全部已重建场景，包括 ARKitScenes、ScanNet 和 ScanNet++，没有场景数量上限。每个场景需有 `cameras.json` 和 `reconstruction.ply`。进度条按已处理场景计数，包括被排除的场景；报告中的 `complete` 表示已遍历全部候选场景。每个场景最多生成 6 组起终点配对（添加俯视兄弟后每组有 2 个任务变体），同一个 initial 最多用于 1 组配对，同一个 target 最多用于 1 组配对；起点和目标分别计算复用次数，同一帧仍可在不同任务中分别充当起点和目标。有效任务不足 6 条时保留已有结果，不因数量不足跳过整个场景；完全没有有效任务的场景仍排除，并在报告中记录原因。按位置、朝向、俯仰和高度分组去重，过滤模糊图像及异常姿态，约束起终点高度差不超过 0.15 米，并尽量平衡近、中、远距离及目标方位。所有任务必须满足原视频的 `initial_frame_index < target_frame_index`，参考路线也只沿视频时间向前。每条参考路线由连续视频位姿投影到起点高度，在该起点对应的外边界网格中逐段检查；不检查家具碰撞，也不将参考路线当作最短路径。生成过程不调用重建或语言模型，使用 Blender 渲染每个场景的俯视图背景。
 
 `MAX_TARGET_PITCH_DEGREES=20` 单独限制目标视角最多向上看 20°：俯仰角相对于估计地面计算，正值朝上、负值朝下。只过滤 target，initial 仍受原有 `MAX_ABS_PITCH_DEGREES=60` 限制；两者仍沿用侧倾、清晰度等其他筛选。每条任务额外记录 `target_pitch_degrees`，报告保存上限参数与角度约定。这是姿态过滤，不是天花板语义识别，不能保证画面中完全不出现天花板。新规则在重新运行生成脚本后生效。
 
 `MAX_ABS_ROLL_DEGREES=5` 要求 initial 和 target 的左右侧倾均在 ±5° 内，相对于估计的场景竖直方向判断。超限视角在候选去重之前排除，两端角度分别保存为 `initial_roll_degrees` 和 `target_roll_degrees`。这是选择近乎水平的原始帧，不旋转图片或修改相机外参；原有两端侧倾差不超过 `MAX_ROLL_DIFFERENCE_DEGREES=10` 的约束继续保留。
 
 候选图片在网格去重前执行结构筛选，initial 和 target 都只允许 **Keep**，**Review / Reject 均排除**。
-筛选逻辑直接位于 `generate_benchmark.py`：亮度归一化、边缘与角点检测、4×4 网格结构覆盖及局部信息量检查。
-阈值集中在 `generate_benchmark.py` 顶部的 `VIEW_FILTER_CONFIG`，默认至少 30 个角点、6/16 个有效网格，综合分数不低于 45，并检查主要为平行线的画面。
+筛选逻辑直接位于 `generate_benchmark/generate_benchmark.py`：亮度归一化、边缘与角点检测、4×4 网格结构覆盖及局部信息量检查。
+阈值集中在 `generate_benchmark/generate_benchmark.py` 顶部的 `VIEW_FILTER_CONFIG`，默认至少 30 个角点、6/16 个有效网格，综合分数不低于 45，并检查主要为平行线的画面。
 不合格图片不能成为起终点；参考路线中间经过的原视频帧仍保留。有效端点不足时，该场景可能生成更少任务或被跳过。
 生成报告的 `view_filter.scenes` 和 `view_filter.totals` 记录每场景和全局的 Keep / Review / Reject 数量、读取失败数及原因；数量统计在姿态筛选后、网格去重前。
 
@@ -83,6 +83,8 @@ outputs/nav_batch_<model>_<goal_mode>_<timestamp>/
 
 基础工具为 `camera_observe()` 和 `camera_action(key, magnitude=None)`，每次成功调用都附上一张当前第一视角 PNG。
 
+`main_nav.py` 和 `main_nav_batch.py` 默认开启 `camera_actions(actions)`，通过 `TOOL_CONFIG['enable_actions']` 控制。传入任意长度的非空动作列表，比如 `[{"key":"turn_left","magnitude":45},{"key":"move_forward","magnitude":1.0},{"key":"turn_down"}]`。每个动作以执行上一项后的相机位姿为起点，沿用单动作的开关、单位和默认幅度。全部处理完后返回最后一张第一视角图及每项的执行状态。受阻动作保持相机原位，后续动作继续执行。批量只增加一次观察，俯视轨迹仍包含每次移动经过的位置。续跑旧批次时，把 `enable_actions` 设为 `False` 以匹配旧配置。
+
 可选工具 `finish_task(status, reason)` 用于主动结束任务，`status` 只能是 `success` 或 `failure`，`reason` 为简短英文依据。通过 `TOOL_CONFIG['enable_finish_task']` 控制，导航入口默认开启，交互入口默认关闭。有效调用会记录工具结果并立即结束本次 agent loop，不再请求模型；无效参数返回工具错误，允许模型重试。同一轮在结束工具之后的其他调用会标记为未执行。终端输出固定格式 JSON，导航输出目录另存 `result.json`，例如：
 
 ```json
@@ -95,7 +97,7 @@ outputs/nav_batch_<model>_<goal_mode>_<timestamp>/
 
 单任务 `result.json`、批量每条任务的 `result.json` 和总表 `results.json` 均包含 `target_camera`。它保留 `cameras.json` 原始记录，包括 `extrinsic`、`intrinsic`、`W/H`、帧索引、时间与原图路径；另外保存目标图片绝对路径 `image`、世界坐标位置 `position`、单位视线 `forward`、单位镜头上方向 `up` 和 OpenCV 约定的 `camera_to_world`。`extrinsic_convention="world_to_camera_opencv"` 表明原始外参将世界坐标变换到相机坐标；`position/forward/up` 与 `final_camera` 使用相同世界坐标系，可直接用于位置与朝向误差计算。目标内参对应原始 target 图片，`final_camera.intrinsics` 对应渲染后的观察图片。尚未读取到目标相机就出错时，`target_camera` 为 `null`。续跑旧批次时，会从各任务的 `task.json` 补齐旧格式结果中的目标参数，不重跑模型或渲染。
 
-`main_agent.py` 和 `main_nav.py` 顶部的 `TOOL_CONFIG` 显式列出全部 15 个布尔开关：`enable_observe`、`enable_action`、`enable_reset` 分别控制 `camera_observe`、`camera_action` 和 `camera_reset`；`enable_move_forward/backward/left/right/up/down` 分别控制六种平移；`enable_turn_left/right/up/down` 分别控制四种转向；`enable_top_down` 和 `enable_finish_task` 控制俯视图与结束工具。两个入口分别独立定义完整的 `TOOL_CONFIG`，互不继承，便于单独调整。关闭工具会将其从注册列表移除，关闭动作会将其从 schema 和描述移除，模型即使尝试调用也会被拒绝；全部动作关闭时，`camera_action` 自动不注册。交互入口当前开启所有移动、转向、观察与重置，关闭俯视图与结束工具；导航入口当前开启前进、四种转向、观察、重置和结束工具。这些开关只限制模型工具，手动入口 `main_env.py` 仍支持全部动作。
+`main_agent.py` 和 `main_nav.py` 顶部的 `TOOL_CONFIG` 用布尔开关控制工具和动作：`enable_observe`、`enable_action`、`enable_reset` 分别控制 `camera_observe`、`camera_action` 和 `camera_reset`；`enable_move_forward/backward/left/right/up/down` 分别控制六种平移；`enable_turn_left/right/up/down` 分别控制四种转向；`enable_top_down` 和 `enable_finish_task` 控制俯视图与结束工具。两个入口分别独立定义完整的 `TOOL_CONFIG`，互不继承，便于单独调整。关闭工具会将其从注册列表移除，关闭动作会将其从 schema 和描述移除，模型即使尝试调用也会被拒绝；全部动作关闭时，`camera_action` 自动不注册。交互入口当前开启所有移动、转向、观察与重置，关闭俯视图与结束工具；导航入口当前开启前进、四种转向、观察、重置和结束工具。这些开关只限制模型工具，手动入口 `main_env.py` 仍支持全部动作。
 
 可选工具 `camera_reset()` 无参数，通过 `enable_reset` 控制，两个 agent 入口默认开启。它将相机直接恢复到本次任务 initial view 的完整位置、镜头姿态（含俯仰和侧倾）及水平朝向，并附上重置后的第一视角；导航中使用选中的 initial view，不一定是视频第一帧。目标、聊天记录、已有轨迹、会话目录和剩余步数均保留，新增一条 `command="reset"` 的观察。俯视图保留历史路线，但不连接重置的瞬移线段。重置不受移动边界阻止；若渲染失败则恢复重置前位姿。手动入口可输入 `reset`，区别于新建目录并清空轨迹的 `/new`。
 
@@ -140,7 +142,7 @@ Agent 每次启动在 `outputs/chat_<场景名>_<模型名>_<时间戳>/` 保存
 
 ## 俯视目标兄弟任务
 
-`generate_benchmark.py` 为每组选中的 initial → target 自动生成两个任务变体，并写入同一个 JSON，
+`generate_benchmark/generate_benchmark.py` 为每组选中的 initial → target 自动生成两个任务变体，并写入同一个 JSON，
 不再需要单独运行额外脚本。每个场景最多 6 对，即最多 12 条任务记录；配额和去重仍以配对为单位。
 第一视角任务使用原 ID，兄弟任务的 `id` 添加 `_top_down`，两者共享 `pair_id`，用 `goal_type` 区分。
 原始 `initial_view`、`target_view` 和参考路线继续保留。

@@ -42,7 +42,12 @@ Blender：`/data4/haibo/software/blender/blender-4.5.13-linux-x64/blender`
 SpaceExp/
 ├── main_nav.py                 # 抽一组任务；配置独立，不从其他 main 导入
 ├── main_nav_batch.py           # 顺序跑完整个 benchmark，保存并支持续跑
-├── generate_benchmark.py       # 帧筛选、配对、参考路线、两种目标图生成
+├── generate_benchmark/
+│   ├── generate_benchmark.py   # 帧筛选、配对、参考路线、两种目标图生成
+│   ├── generate_train_trajectories_real_multi_step.py
+│   ├── generate_train_trajectories_sim_single_step.py
+│   ├── render_train_trajectories_real_multi_step.py
+│   └── render_train_trajectories_sim_single_step.py
 ├── agent/
 │   ├── loop.py                 # 模型调用、工具执行、图片预算、结束控制
 │   ├── backend.py              # vLLM Chat Completions / OpenAI Responses
@@ -65,7 +70,7 @@ SpaceExp/
 
 原 `agent/navigation.py` 先移到根目录，之后按用户要求彻底拆除：
 
-- `merge_goal_tasks` 在 `generate_benchmark.py`。
+- `merge_goal_tasks` 在 `generate_benchmark/generate_benchmark.py`。
 - `select_navigation_tasks`、`navigation_goal` 分别存在两个导航入口里，入口相互独立。
 - 根目录和 `agent/` 均没有 `navigation.py`。
 
@@ -118,7 +123,7 @@ SpaceExp/
 - `preview` 相对于 benchmark JSON 所在目录。
 - 俯视目标图位于 `/data4/haibo/data/3D_Env/top_down_goals/<dataset>/<scene>/<pair_id>.png`。
 
-`generate_benchmark.py` 当前读取 `DATA_ROOT/'train.json'`，输出 `outputs/benchmark_train.json` 和训练预览。一次生成 first-person/top-down 两种任务，不再有独立的 `generate_top_down_goals.py` 或 `view_filter.py`。
+`generate_benchmark/generate_benchmark.py` 当前读取 `DATA_ROOT/'train.json'`，输出 `outputs/benchmark_train.json` 和训练预览。一次生成 first-person/top-down 两种任务，不再有独立的 `generate_top_down_goals.py` 或 `view_filter.py`。
 
 核心选择规则：
 

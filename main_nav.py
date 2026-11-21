@@ -251,6 +251,7 @@ TOOL_CONFIG = {
     'enable_observe': True,
     'enable_finish_task': True,
     'enable_action': True,
+    'enable_actions': True,
     'enable_reset': True,
     'enable_turn_left': True,
     'enable_turn_right': True,

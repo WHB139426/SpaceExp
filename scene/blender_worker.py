@@ -35,6 +35,8 @@ def main():
                     result = renderer.observe()
                 elif operation == 'action':
                     result = renderer.action(**params)
+                elif operation == 'actions':
+                    result = renderer.actions(**params)
                 elif operation == 'reset':
                     result = renderer.reset()
                 elif operation == 'start_session':

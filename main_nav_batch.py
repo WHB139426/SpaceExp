@@ -23,7 +23,7 @@ GOAL_MODE = 'both'  # 'first_person', 'top_down', or 'both'.
 OUTPUT_DIR = Path(__file__).resolve().parent / 'outputs'
 RESUME_DIR = None  # Set to a previous nav_batch_* directory to continue it.
 
-MODEL = "qwen3.5-9b"
+MODEL = "gpt-6.1-terra"
 
 MODEL_GENERATION_CONFIGS = {
     "glm-5.3-flash": {
@@ -127,6 +127,7 @@ TOOL_CONFIG = {
     'enable_observe': True,
     'enable_finish_task': True,
     'enable_action': True,
+    'enable_actions': True,
     'enable_reset': True,
     'enable_turn_left': True,
     'enable_turn_right': True,
@@ -437,6 +438,7 @@ def main():
             backend_name = MODEL_ADAPTERS[saved_settings['model']]['backend']
             saved_settings['model_config'] = {**saved_settings['model_config'],
                                              'server_config': saved_settings.pop('server_config')[backend_name]}
+        saved_settings['tool_config'].setdefault('enable_actions', False)
         if saved_settings != settings:
             raise ValueError('Resume settings differ from run.json; restore the original configuration')
         if saved_tasks != tasks:
