@@ -12,3 +12,6 @@ matplotlib
 deepspeed==0.17.1
 accelerate
 wandb
+
+# flash attention 2
+# pip install flash-attn==2.8.3 --no-build-isolation

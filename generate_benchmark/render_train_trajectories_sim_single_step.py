@@ -28,7 +28,7 @@ from scene.client import CameraClient
 
 TRAJECTORY_JSON = PROJECT_DIR / 'outputs' / 'benchmark_train_traj_sim_single_step.json'
 DATA_ROOT = Path('/data4/haibo/data/3D_Env')
-OUTPUT_DIR = PROJECT_DIR / 'outputs' / 'train_traj_sim_single_step_renders'
+OUTPUT_DIR = DATA_ROOT / 'train_traj_sim_single_step_renders'
 NUM_WORKERS = 16
 MAX_TRAJECTORIES = None  # Set to an integer to render a prefix for a pilot run.
 RETRY_ERRORS = True
@@ -247,7 +247,8 @@ def backfill_image_paths(path, data, jobs, root, results, expected_file, image_f
         steps = row['route_actions']
         if result and result['status'] == 'rendered':
             for step, image in zip(steps, result['image_paths'], strict=True):
-                reference = os.path.relpath(root / image, path.parent)
+                # Keep the render folder prefix relative to its parent directory.
+                reference = (Path(root.name) / image).as_posix()
                 if step.get(image_field) != reference:
                     step[image_field] = reference
                     changed = True
@@ -258,7 +259,8 @@ def backfill_image_paths(path, data, jobs, root, results, expected_file, image_f
             for step in steps:
                 for field in fields:
                     image = step.get(field)
-                    if image and (path.parent / image).resolve().is_relative_to(root):
+                    if image and ((root.parent / image).resolve().is_relative_to(root)
+                                  or (path.parent / image).resolve().is_relative_to(root)):
                         del step[field]
                         changed = True
     if changed:

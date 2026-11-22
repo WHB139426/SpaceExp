@@ -17,18 +17,11 @@ if __name__ == '__main__' and not __package__:
 from agent.tools import create_tools
 
 
-DATA_ROOT = Path('/data4/haibo/data/3D_Env')
-DEFAULT_TRAJECTORY_JSONS = {
-    'multi_step': '/data4/haibo/code/SpaceExp/outputs/benchmark_train_traj_real_multi_step.json',
-    'single_step': '/data4/haibo/code/SpaceExp/outputs/benchmark_train_traj_sim_single_step.json',
-}
-DEFAULT_MODEL_PATH = Path('/data4/haibo/weights/Qwen3.5-9B')
 ACTION_TOOLS = {'multi_step': 'camera_actions', 'single_step': 'camera_action'}
 OBSERVATION_FIELDS = {
     'multi_step': {'render': 'render_img_path', 'frame': 'frame_path'},
     'single_step': {'render': 'image_path'},
 }
-
 MOVE_STEP_M = 0.3
 LOOK_STEP_DEGREES = 15
 TOOL_CONFIG = {
@@ -81,20 +74,33 @@ def _image_part(path):
     return {'type': 'image', 'image': str(path)}
 
 
+def _step_arguments(step):
+    arguments = deepcopy(step['arguments'])
+    if step['name'] == 'camera_action':
+        actions = (arguments,)
+    elif step['name'] == 'camera_actions':
+        actions = arguments['actions']
+    else:
+        return arguments
+    for action in actions:
+        action['magnitude'] = max(0.1, round(float(action['magnitude']), 1))
+    return arguments
+
+
 def _action_result(action):
     # Both manifests describe successfully executed expert actions.
     magnitude = action['magnitude']
     return {'magnitude': magnitude, 'applied_magnitude': magnitude, 'blocked': False, 'reason': None}
 
 
-def _observation_result(step, observation_id):
+def _observation_result(name, arguments, observation_id):
     result = {'observation_id': observation_id}
-    if step['name'] == 'camera_action':
-        result.update(_action_result(step['arguments']))
-    elif step['name'] == 'camera_actions':
+    if name == 'camera_action':
+        result.update(_action_result(arguments))
+    elif name == 'camera_actions':
         result['actions'] = [
             {'key': action['key'], **_action_result(action)}
-            for action in step['arguments']['actions']
+            for action in arguments['actions']
         ]
     return json.dumps({'ok': True, 'result': result}, ensure_ascii=False)
 
@@ -102,36 +108,33 @@ def _observation_result(step, observation_id):
 class NavigationTrajectoryDataset(Dataset):
     """Return one complete conversation and its tool schemas per trajectory.
 
-    The trajectory type selects the default manifest and motion tool.
-    Render paths are relative to the manifest. Multi-step trajectories can
-    also use `observation_source="frame"` to load frames from each scene.
-    Use `require_both_observations=True` to pair the two multi-step image sources.
+    Reference paths are relative to each scene under `data_root`. Rendered
+    observations are relative to `observation_root` and may include its
+    directory name as a prefix. Frame observations are relative to each
+    scene under that root. The trajectory type and source select the
+    observation field.
     """
 
     def __init__(
         self,
-        trajectory_json: str | Path | None = None,
-        data_root: str | Path = DATA_ROOT,
+        trajectory_json: str | Path,
+        data_root: str | Path,
+        observation_root: str | Path,
         trajectory_type: Literal['multi_step', 'single_step'] = 'multi_step',
         observation_source: Literal['render', 'frame'] = 'render',
-        require_both_observations: bool = False,
     ):
         if trajectory_type not in ACTION_TOOLS:
             raise ValueError("trajectory_type must be 'multi_step' or 'single_step'")
         observation_fields = OBSERVATION_FIELDS[trajectory_type]
         if observation_source not in observation_fields:
             raise ValueError(f'{trajectory_type} observation_source must be one of {", ".join(observation_fields)}')
-        if require_both_observations and trajectory_type != 'multi_step':
-            raise ValueError('require_both_observations requires multi_step trajectories')
-        if trajectory_json is None:
-            trajectory_json = DEFAULT_TRAJECTORY_JSONS[trajectory_type]
+        observation_field = observation_fields[observation_source]
 
         self.trajectory_json = Path(trajectory_json).expanduser().resolve()
         self.data_root = Path(data_root).expanduser().resolve()
+        self.observation_root = Path(observation_root).expanduser().resolve()
         self.observation_source = observation_source
         self.trajectory_type = trajectory_type
-        field = observation_fields[observation_source]
-        required_fields = observation_fields.values() if require_both_observations else (field,)
         route_tools = ('camera_observe', ACTION_TOOLS[trajectory_type])
 
         self.prompt = USER_PROMPT
@@ -156,7 +159,7 @@ class NavigationTrajectoryDataset(Dataset):
             ):
                 raise ValueError(f"Invalid {trajectory_type} trajectory: {row['scene']}/{row['pair_id']}")
             # finish_task leaves the camera in place and has no observation.
-            if any(not step.get(key) for step in steps[:-1] for key in required_fields):
+            if any(not step.get(observation_field) for step in steps[:-1]):
                 self.skipped_missing_observations += 1
                 continue
 
@@ -167,12 +170,12 @@ class NavigationTrajectoryDataset(Dataset):
                 'initial_view': row['initial_view'],
                 'target_view': row['target_view'],
                 'steps': [
-                    {'name': step['name'], 'arguments': step['arguments'], 'image': step.get(field)}
+                    {'name': step['name'], 'arguments': step['arguments'], 'image': step.get(observation_field)}
                     for step in steps
                 ],
             })
         if not self.trajectories:
-            raise ValueError(f'No complete {observation_source} trajectories in {self.trajectory_json}')
+            raise ValueError(f'No trajectories with observation field {observation_field!r} in {self.trajectory_json}')
 
     def __len__(self):
         return len(self.trajectories)
@@ -180,7 +183,9 @@ class NavigationTrajectoryDataset(Dataset):
     def __getitem__(self, index):
         row = self.trajectories[index]
         scene_dir = self.data_root / row['scene']
-        observation_dir = self.trajectory_json.parent if self.observation_source == 'render' else scene_dir
+        observation_dir = self.observation_root
+        if self.observation_source == 'frame':
+            observation_dir = observation_dir / row['scene']
         messages = [
             {'role': 'system', 'content': SYSTEM_PROMPT},
             {'role': 'user', 'content': [
@@ -194,6 +199,7 @@ class NavigationTrajectoryDataset(Dataset):
         # The online runner records an initial observation before the first tool call.
         for observation_id, step in enumerate(row['steps'], start=2):
             name = step['name']
+            arguments = _step_arguments(step)
             call_id = f'call_{observation_id - 1}'
             messages.append({
                 'role': 'assistant',
@@ -201,21 +207,24 @@ class NavigationTrajectoryDataset(Dataset):
                 'tool_calls': [{
                     'id': call_id,
                     'type': 'function',
-                    'function': {'name': name, 'arguments': deepcopy(step['arguments'])},
+                    'function': {'name': name, 'arguments': arguments},
                 }],
             })
             if name == 'finish_task':
                 break
+            image_path = Path(step['image'])
+            if self.observation_source == 'render' and image_path.is_relative_to(observation_dir.name):
+                image_path = image_path.relative_to(observation_dir.name)
             messages.extend([
                 {
                     'role': 'tool',
                     'tool_call_id': call_id,
                     'name': name,
-                    'content': _observation_result(step, observation_id),
+                    'content': _observation_result(name, arguments, observation_id),
                 },
                 {'role': 'user', 'content': [
                     _text_part('<first_person_view>'),
-                    _image_part(observation_dir / step['image']),
+                    _image_part(observation_dir / image_path),
                     _text_part('</first_person_view>'),
                 ]},
             ])
@@ -235,13 +244,26 @@ def main():
     from itertools import groupby
 
     parser = argparse.ArgumentParser(description='Inspect random first-person SFT trajectories.')
-    parser.add_argument('--trajectory-type', choices=ACTION_TOOLS, default='multi_step')
-    parser.add_argument('--trajectory-json', type=Path, help='Override the manifest for the selected trajectory type.')
-    parser.add_argument('--data-root', type=Path, default=DATA_ROOT)
-    parser.add_argument('--model-path', type=Path, default=DEFAULT_MODEL_PATH)
+    parser.add_argument('--data-root', default='/data4/haibo/data/3D_Env')
+
+    # parser.add_argument('--trajectory-type', choices=ACTION_TOOLS, default='multi_step')
+    # parser.add_argument('--observation-source', choices=('render', 'frame'), default='render')
+    # parser.add_argument('--trajectory-json', default='/data4/haibo/code/SpaceExp/outputs/benchmark_train_traj_real_multi_step.json')
+    # parser.add_argument('--observation-root', default='/data4/haibo/data/3D_Env/train_traj_real_multi_step_renders')
+
+    # parser.add_argument('--trajectory-type', choices=ACTION_TOOLS, default='multi_step')
+    # parser.add_argument('--observation-source', choices=('render', 'frame'), default='frame')
+    # parser.add_argument('--trajectory-json', default='/data4/haibo/code/SpaceExp/outputs/benchmark_train_traj_real_multi_step.json')
+    # parser.add_argument('--observation-root', default='/data4/haibo/data/3D_Env')
+
+    parser.add_argument('--trajectory-type', choices=ACTION_TOOLS, default='single_step')
     parser.add_argument('--observation-source', choices=('render', 'frame'), default='render')
-    parser.add_argument('--require-both-observations', action='store_true')
-    parser.add_argument('--num-samples', type=int, default=10)
+    parser.add_argument('--trajectory-json', default='/data4/haibo/code/SpaceExp/outputs/benchmark_train_traj_sim_single_step.json')
+    parser.add_argument('--observation-root', default='/data4/haibo/data/3D_Env/train_traj_sim_single_step_renders')
+
+
+    parser.add_argument('--model-path', type=Path, default='/data4/haibo/weights/Qwen3.5-9B')
+    parser.add_argument('--num-samples', type=int, default=1)
     parser.add_argument('--seed', type=int, default=42)
     args = parser.parse_args()
     if args.num_samples < 1:
@@ -254,9 +276,9 @@ def main():
     dataset = NavigationTrajectoryDataset(
         trajectory_json=args.trajectory_json,
         data_root=args.data_root,
+        observation_root=args.observation_root,
         trajectory_type=args.trajectory_type,
         observation_source=args.observation_source,
-        require_both_observations=args.require_both_observations,
     )
     processor = AutoProcessor.from_pretrained(args.model_path.expanduser(), local_files_only=True)
     indices = random.Random(args.seed).sample(range(len(dataset)), min(args.num_samples, len(dataset)))

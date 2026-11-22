@@ -8,14 +8,15 @@ from transformers import TrainingArguments as HFTrainingArguments
 @dataclass
 class ModelArguments:
     model_name_or_path: Optional[str] = field(default='/data4/haibo/weights/Qwen3.5-9B')
-    tune_mm_llm: bool = field(default=False)
+    tune_mm_llm: bool = field(default=True)
     tune_mm_mlp: bool = field(default=False)
-    tune_mm_vision: bool = field(default=True)
+    tune_mm_vision: bool = field(default=False)
 
 @dataclass
 class DataArguments:
-    data_root: Optional[str] = field(default='/data4/haibo/data/3D_Env')
-    trajectory_json: Optional[str] = field(default='/data4/haibo/code/SpaceExp/outputs/benchmark_train_traj_real_multi_step.json')
+    data_root: str
+    trajectory_json: str
+    observation_root: str
     trajectory_type: Literal['multi_step', 'single_step'] = 'multi_step'
     observation_source: Literal['render', 'frame'] = 'render'
 

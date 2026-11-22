@@ -14,7 +14,7 @@ from main_nav_batch import SCENE_CONFIG as NAV_SCENE_CONFIG
 
 TRAJECTORY_JSON = PROJECT_DIR / 'outputs' / 'benchmark_train_traj_real_multi_step.json'
 DATA_ROOT = Path('/data4/haibo/data/3D_Env')
-OUTPUT_DIR = PROJECT_DIR / 'outputs' / 'train_traj_real_multi_step_renders'
+OUTPUT_DIR = DATA_ROOT / 'train_traj_real_multi_step_renders'
 NUM_WORKERS = 8
 MAX_TRAJECTORIES = None  # Set to an integer to render a prefix for a pilot run.
 RETRY_ERRORS = True
