@@ -4,7 +4,7 @@
 MASTER_PORT=${MASTER_PORT:-$(shuf -i 20001-29999 -n 1)}
 
 # DeepSpeed configuration
-deepspeed_config=/data4/haibo/code/SpaceExp/sft/configs/zero2.json
+deepspeed_config=/data4/haibo/code/SpaceExp/sft/configs/zero3.json
 export WANDB_PROJECT=SpaceExp
 
 # Model configuration
@@ -29,8 +29,8 @@ observation_root=/data4/haibo/data/3D_Env/train_traj_real_multi_step_renders
 # observation_root=/data4/haibo/data/3D_Env/train_traj_sim_single_step_renders
 
 # Training hyperparameters
-batch_size=1
-grad_accum_steps=4
+batch_size=4
+grad_accum_steps=2
 learning_rate=2e-5
 num_train_epochs=1
 
@@ -63,7 +63,7 @@ args="
     --save_strategy steps
     --save_steps 300
     --save_total_limit 1
-    --logging_steps 10
+    --logging_steps 1
     --report_to wandb
 "
 

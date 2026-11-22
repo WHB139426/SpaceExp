@@ -58,7 +58,7 @@ MODEL_GENERATION_CONFIGS = {
         "temperature": 1.0,
         "top_p": 0.95,
         "top_k": 20,
-        "enable_thinking": True,
+        "enable_thinking": False,
     },
     "qwen3.8-27b": {
         "server_config": {
