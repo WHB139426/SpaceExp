@@ -19,11 +19,11 @@ from scene.client import CameraClient, reference_camera_state
 
 DATA_ROOT = Path('/data4/haibo/data/3D_Env')
 BENCHMARK_JSON = Path(__file__).resolve().parent / 'outputs' / 'sub_benchmark_test.json'
-GOAL_MODE = 'both'  # 'first_person', 'top_down', or 'both'.
+GOAL_MODE = 'first_person'  # 'first_person', 'top_down', or 'both'.
 OUTPUT_DIR = Path(__file__).resolve().parent / 'outputs'
 RESUME_DIR = None  # Set to a previous nav_batch_* directory to continue it.
 
-MODEL = "gpt-6.1-terra"
+MODEL = "qwen3.8-27b"
 
 MODEL_GENERATION_CONFIGS = {
     "glm-5.3-flash": {
