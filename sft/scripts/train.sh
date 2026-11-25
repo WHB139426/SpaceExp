@@ -68,7 +68,7 @@ args="
 "
 
 # Launch training
-CUDA_VISIBLE_DEVICES=1,2 torchrun --nproc_per_node=2 \
+CUDA_VISIBLE_DEVICES=0,1,2 torchrun --nproc_per_node=3 \
                     --nnodes=1 \
                     --master_port=${MASTER_PORT} \
                     ${entry_file} ${args}
@@ -76,7 +76,7 @@ CUDA_VISIBLE_DEVICES=1,2 torchrun --nproc_per_node=2 \
 
 
 
-# CUDA_VISIBLE_DEVICES=1 \
+# CUDA_VISIBLE_DEVICES=0 \
 # VLLM_ENGINE_READY_TIMEOUT_S=3600 \
 # vllm serve /data4/haibo/code/SpaceExp/outputs/sft/Qwen3.5-9B-nav-multi_step-render \
 #   --served-model-name qwen3.5-9b \

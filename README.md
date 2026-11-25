@@ -313,7 +313,7 @@ Requires `transformers>=5.8.0`. Uses the native 262,144-token context window
 without RoPE scaling overrides.
 
 ```bash
-CUDA_VISIBLE_DEVICES=2 \
+CUDA_VISIBLE_DEVICES=0 \
 VLLM_ENGINE_READY_TIMEOUT_S=3600 \
 vllm serve /data4/haibo/weights/Qwen3.8-27B-FP8 \
   --served-model-name qwen3.8-27b \

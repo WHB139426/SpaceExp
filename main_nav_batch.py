@@ -23,7 +23,7 @@ GOAL_MODE = 'first_person'  # 'first_person', 'top_down', or 'both'.
 OUTPUT_DIR = Path(__file__).resolve().parent / 'outputs'
 RESUME_DIR = None  # Set to a previous nav_batch_* directory to continue it.
 
-MODEL = "qwen3.8-27b"
+MODEL = "qwen3.5-9b"
 
 MODEL_GENERATION_CONFIGS = {
     "glm-5.3-flash": {
@@ -128,7 +128,6 @@ TOOL_CONFIG = {
     'enable_finish_task': True,
     'enable_action': True,
     'enable_actions': True,
-    'enable_reset': True,
     'enable_turn_left': True,
     'enable_turn_right': True,
     'enable_turn_up': True,
@@ -139,6 +138,7 @@ TOOL_CONFIG = {
     'enable_move_right': False,
     'enable_move_up': False,
     'enable_move_down': False,
+    'enable_reset': False,
     'enable_top_down': False,  # Optional map tool for navigation experiments.
 }
 

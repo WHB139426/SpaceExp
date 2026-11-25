@@ -28,7 +28,6 @@ TOOL_CONFIG = {
     'enable_observe': True,
     'enable_finish_task': True,
     'enable_action': True,
-    'enable_reset': True,
     'enable_turn_left': True,
     'enable_turn_right': True,
     'enable_turn_up': True,
@@ -39,6 +38,7 @@ TOOL_CONFIG = {
     'enable_move_right': False,
     'enable_move_up': False,
     'enable_move_down': False,
+    'enable_reset': False,
     'enable_top_down': False,
 }
 
